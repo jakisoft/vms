@@ -259,7 +259,6 @@ create_new_vm() {
     save_vm_config
 }
 
-# Function to setup VM image
 setup_vm_image() {
     print_status "INFO" "Downloading and preparing image..."
     
@@ -334,6 +333,15 @@ start_vm() {
             setup_vm_image
         fi
         
+        local netdev_base="user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
+        if [[ -n "$PORT_FORWARDS" ]]; then
+            IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
+            for forward in "${forwards[@]}"; do
+                IFS=':' read -r host_port guest_port <<< "$forward"
+                netdev_base+=",hostfwd=tcp::$host_port-:$guest_port"
+            done
+        fi
+
         local qemu_cmd=(
             qemu-system-x86_64
             -m "$MEMORY"
@@ -343,17 +351,8 @@ start_vm() {
             -drive "file=$SEED_FILE,format=raw,if=virtio"
             -boot order=c
             -device virtio-net-pci,netdev=n0
-            -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
+            -netdev "$netdev_base"
         )
-
-        if [[ -n "$PORT_FORWARDS" ]]; then
-            IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
-            for forward in "${forwards[@]}"; do
-                IFS=':' read -r host_port guest_port <<< "$forward"
-                qemu_cmd+=(-device "virtio-net-pci,netdev=n${#qemu_cmd[@]}")
-                qemu_cmd+=(-netdev "user,id=n${#qemu_cmd[@]},hostfwd=tcp::$host_port-:$guest_port")
-            done
-        fi
 
         if [[ "$GUI_MODE" == true ]]; then
             qemu_cmd+=(-vga std -display vnc=:1)
