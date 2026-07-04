@@ -9,10 +9,10 @@ display_header() {
  | |  | |/ __ \|  __ \_   _| \ | |/ ____|  _ \ / __ \ \   / /___  /
  | |__| | |  | | |__) || | |  \| | |  __| |_) | |  | \ \_/ /   / / 
  |  __  | |  | |  ___/ | | |   \ | | |_ |  _ <| |  | |\   /   / /  
- | |  | | |__| | |    _| |_| |\  | |__| | |_) | |__| | | |   / /__ 
- |_|  |_|\____/|_|   |_____|_| \_|\_____|____/ \____/  |_|  /_____|
-                                                                  
-                    POWERED BY HOPINGBOYZ
+ | |  | | |__| | |     _| |_| |\  | |__| | |_) | |__| | | |   / /__ 
+ |_|  |_|\____/|_|    |_____|_| \_|\_____|____/ \____/  |_|  /_____|
+                                                                    
+                        POWERED BY HOPINGBOYZ
 ========================================================================
 EOF
     echo
@@ -21,6 +21,7 @@ EOF
 print_status() {
     local type=$1
     local message=$2
+    
     case $type in
         "INFO") echo -e "\033[1;34m[INFO]\033[0m $message" ;;
         "WARN") echo -e "\033[1;33m[WARN]\033[0m $message" ;;
@@ -34,6 +35,7 @@ print_status() {
 validate_input() {
     local type=$1
     local value=$2
+    
     case $type in
         "number")
             if ! [[ "$value" =~ ^[0-9]+$ ]]; then
@@ -70,16 +72,18 @@ validate_input() {
 }
 
 check_dependencies() {
-    local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img" "tmate" "sshpass")
+    local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img" "screen")
     local missing_deps=()
+    
     for dep in "${deps[@]}"; do
         if ! command -v "$dep" &> /dev/null; then
             missing_deps+=("$dep")
         fi
     done
+    
     if [ ${#missing_deps[@]} -ne 0 ]; then
         print_status "ERROR" "Missing dependencies: ${missing_deps[*]}"
-        print_status "INFO" "On Ubuntu/Debian, try: sudo apt update && sudo apt install -y qemu-system cloud-image-utils wget tmate sshpass"
+        print_status "INFO" "On Ubuntu/Debian, try: sudo apt install qemu-system cloud-image-utils wget screen"
         exit 1
     fi
 }
@@ -96,9 +100,11 @@ get_vm_list() {
 load_vm_config() {
     local vm_name=$1
     local config_file="$VM_DIR/$vm_name.conf"
+    
     if [[ -f "$config_file" ]]; then
         unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
         unset DISK_SIZE MEMORY CPUS SSH_PORT GUI_MODE PORT_FORWARDS IMG_FILE SEED_FILE CREATED
+        
         source "$config_file"
         return 0
     else
@@ -109,6 +115,7 @@ load_vm_config() {
 
 save_vm_config() {
     local config_file="$VM_DIR/$VM_NAME.conf"
+    
     cat > "$config_file" <<EOF
 VM_NAME="$VM_NAME"
 OS_TYPE="$OS_TYPE"
@@ -127,11 +134,13 @@ IMG_FILE="$IMG_FILE"
 SEED_FILE="$SEED_FILE"
 CREATED="$CREATED"
 EOF
+    
     print_status "SUCCESS" "Configuration saved to $config_file"
 }
 
 create_new_vm() {
     print_status "INFO" "Creating a new VM"
+    
     local os_options=()
     local i=1
     for os in "${!OS_OPTIONS[@]}"; do
@@ -139,6 +148,7 @@ create_new_vm() {
         os_options[$i]="$os"
         ((i++))
     done
+    
     while true; do
         read -p "$(print_status "INPUT" "Enter your choice (1-${#OS_OPTIONS[@]}): ")" choice
         if [[ "$choice" =~ ^[0-9]+$ ]] && [ "$choice" -ge 1 ] && [ "$choice" -le ${#OS_OPTIONS[@]} ]; then
@@ -251,7 +261,9 @@ create_new_vm() {
 
 setup_vm_image() {
     print_status "INFO" "Downloading and preparing image..."
+    
     mkdir -p "$VM_DIR"
+    
     if [[ -f "$IMG_FILE" ]]; then
         print_status "INFO" "Image file already exists. Skipping download."
     else
@@ -262,6 +274,7 @@ setup_vm_image() {
         fi
         mv "$IMG_FILE.tmp" "$IMG_FILE"
     fi
+    
     if ! qemu-img resize "$IMG_FILE" "$DISK_SIZE" &>/dev/null; then
         print_status "WARN" "Failed to resize disk image. Creating new image with specified size..."
         rm -f "$IMG_FILE"
@@ -298,68 +311,21 @@ EOF
         print_status "ERROR" "Failed to create cloud-init seed image"
         exit 1
     fi
+    
     print_status "SUCCESS" "VM '$VM_NAME' created successfully."
-}
-
-wait_for_ssh() {
-    local port=$1
-    print_status "INFO" "Waiting for VM SSH service to become ready on port $port..."
-    while ! nc -z localhost "$port" &>/dev/null; do
-        sleep 2
-    done
-    print_status "SUCCESS" "VM SSH is now online and accepting connections!"
-}
-
-start_vm_bg() {
-    local vm_name=$1
-    if load_vm_config "$vm_name"; then
-        if is_vm_running "$vm_name"; then
-            return 0
-        fi
-        
-        local netdev_base="user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
-        if [[ -n "$PORT_FORWARDS" ]]; then
-            IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
-            for forward in "${forwards[@]}"; do
-                IFS=':' read -r host_port guest_port <<< "$forward"
-                netdev_base+=",hostfwd=tcp::$host_port-:$guest_port"
-            done
-        fi
-
-        local qemu_cmd=(
-            qemu-system-x86_64
-            -m "$MEMORY"
-            -smp "$CPUS"
-            -cpu qemu64
-            -drive "file=$IMG_FILE,format=qcow2,if=virtio"
-            -drive "file=$SEED_FILE,format=raw,if=virtio"
-            -boot order=c
-            -device virtio-net-pci,netdev=n0
-            -netdev "$netdev_base"
-            -daemonize
-        )
-
-        if [[ "$GUI_MODE" == true ]]; then
-            qemu_cmd+=(-vga std -display vnc=:1)
-        else
-            qemu_cmd+=(-nographic -serial null)
-        fi
-
-        qemu_cmd+=(
-            -device virtio-balloon-pci
-            -object rng-random,filename=/dev/urandom,id=rng0
-            -device virtio-rng-pci,rng=rng0
-        )
-
-        print_status "INFO" "Booting $vm_name in background..."
-        "${qemu_cmd[@]}"
-        wait_for_ssh "$SSH_PORT"
-    fi
 }
 
 start_vm() {
     local vm_name=$1
+    
     if load_vm_config "$vm_name"; then
+        if is_vm_running "$vm_name"; then
+            print_status "WARN" "VM $vm_name is already running. Attaching to session..."
+            sleep 1
+            screen -r "qemu-$vm_name"
+            return 0
+        fi
+
         print_status "INFO" "Starting VM: $vm_name"
         print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
         print_status "INFO" "Password: $PASSWORD"
@@ -368,20 +334,12 @@ start_vm() {
             print_status "ERROR" "VM image file not found: $IMG_FILE"
             return 1
         fi
+        
         if [[ ! -f "$SEED_FILE" ]]; then
             print_status "WARN" "Seed file not found, recreating..."
             setup_vm_image
         fi
         
-        local netdev_base="user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
-        if [[ -n "$PORT_FORWARDS" ]]; then
-            IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
-            for forward in "${forwards[@]}"; do
-                IFS=':' read -r host_port guest_port <<< "$forward"
-                netdev_base+=",hostfwd=tcp::$host_port-:$guest_port"
-            done
-        fi
-
         local qemu_cmd=(
             qemu-system-x86_64
             -m "$MEMORY"
@@ -391,8 +349,17 @@ start_vm() {
             -drive "file=$SEED_FILE,format=raw,if=virtio"
             -boot order=c
             -device virtio-net-pci,netdev=n0
-            -netdev "$netdev_base"
+            -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
         )
+
+        if [[ -n "$PORT_FORWARDS" ]]; then
+            IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
+            for forward in "${forwards[@]}"; do
+                IFS=':' read -r host_port guest_port <<< "$forward"
+                qemu_cmd+=(-device "virtio-net-pci,netdev=n${#qemu_cmd[@]}")
+                qemu_cmd+=(-netdev "user,id=n${#qemu_cmd[@]},hostfwd=tcp::$host_port-:$guest_port")
+            done
+        fi
 
         if [[ "$GUI_MODE" == true ]]; then
             qemu_cmd+=(-vga std -display vnc=:1)
@@ -407,50 +374,29 @@ start_vm() {
             -device virtio-rng-pci,rng=rng0
         )
 
-        print_status "INFO" "Starting QEMU..."
-        "${qemu_cmd[@]}"
-        print_status "INFO" "VM $vm_name has been shut down"
-    fi
-}
-
-generate_tmate_ssh() {
-    local vm_name=$1
-    if load_vm_config "$vm_name"; then
-        if ! is_vm_running "$vm_name"; then
-            start_vm_bg "$vm_name"
-        else
-            wait_for_ssh "$SSH_PORT"
-        fi
-
-        print_status "INFO" "Initializing tmate tunnel for direct auto-login into VM..."
-        local socket_path="/tmp/tmate-$vm_name.sock"
-        rm -f "$socket_path"
-
-        tmate -S "$socket_path" new-session -d "sshpass -p '$PASSWORD' ssh -o StrictHostKeyChecking=no -o UserKnownHostsFile=/dev/null -p $SSH_PORT $USERNAME@localhost"
-        tmate -S "$socket_path" wait-of
+        print_status "INFO" "Starting QEMU in screen session 'qemu-$vm_name'..."
+        screen -dmS "qemu-$vm_name" "${qemu_cmd[@]}"
+        sleep 1
         
-        echo "========================================================================"
-        print_status "SUCCESS" "Tmate SSH Session generated successfully!"
-        echo "------------------------------------------------------------------------"
-        echo -n "SSH Command: "
-        tmate -S "$socket_path" display -p '#{tmate_ssh}'
-        echo -n "Web URL:     "
-        tmate -S "$socket_path" display -p '#{tmate_web}'
-        echo "========================================================================"
-        echo
-        read -p "$(print_status "INPUT" "Press Enter to close tunnel and stop sharing...")"
-        tmate -S "$socket_path" kill-session 2>/dev/null || true
-        rm -f "$socket_path"
+        print_status "SUCCESS" "VM $vm_name started successfully in background."
+        read -p "$(print_status "INPUT" "Do you want to attach to VM console now? (y/N): ")" attach_choice
+        if [[ "$attach_choice" =~ ^[Yy]$ ]]; then
+            screen -r "qemu-$vm_name"
+        fi
     fi
 }
 
 delete_vm() {
     local vm_name=$1
+    
     print_status "WARN" "This will permanently delete VM '$vm_name' and all its data!"
     read -p "$(print_status "INPUT" "Are you sure? (y/N): ")" -n 1 -r
     echo
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if load_vm_config "$vm_name"; then
+            if is_vm_running "$vm_name"; then
+                stop_vm "$vm_name"
+            fi
             rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf"
             print_status "SUCCESS" "VM '$vm_name' has been deleted"
         fi
@@ -461,10 +407,17 @@ delete_vm() {
 
 show_vm_info() {
     local vm_name=$1
+    
     if load_vm_config "$vm_name"; then
+        local current_status="Stopped"
+        if is_vm_running "$vm_name"; then
+            current_status="Running"
+        fi
+
         echo
         print_status "INFO" "VM Information: $vm_name"
         echo "=========================================="
+        echo "Status: $current_status"
         echo "OS: $OS_TYPE"
         echo "Hostname: $HOSTNAME"
         echo "Username: $USERNAME"
@@ -486,7 +439,7 @@ show_vm_info() {
 
 is_vm_running() {
     local vm_name=$1
-    if pgrep -f "qemu-system-x86_64.*$vm_name" >/dev/null; then
+    if screen -list | grep -q "\.qemu-$vm_name\b"; then
         return 0
     else
         return 1
@@ -495,15 +448,20 @@ is_vm_running() {
 
 stop_vm() {
     local vm_name=$1
+    
     if load_vm_config "$vm_name"; then
         if is_vm_running "$vm_name"; then
             print_status "INFO" "Stopping VM: $vm_name"
-            pkill -f "qemu-system-x86_64.*$IMG_FILE"
-            sleep 2
-            if is_vm_running "$vm_name"; then
-                print_status "WARN" "VM did not stop gracefully, forcing termination..."
-                pkill -9 -f "qemu-system-x86_64.*$IMG_FILE"
+            local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$vm_name")
+            if [[ -n "$qemu_pid" ]]; then
+                kill "$qemu_pid"
+                sleep 2
+                if pgrep -p "$qemu_pid" >/dev/null; then
+                    print_status "WARN" "VM did not stop gracefully, forcing termination..."
+                    kill -9 "$qemu_pid"
+                fi
             fi
+            screen -X -S "qemu-$vm_name" quit 2>/dev/null || true
             print_status "SUCCESS" "VM $vm_name stopped"
         else
             print_status "INFO" "VM $vm_name is not running"
@@ -513,8 +471,10 @@ stop_vm() {
 
 edit_vm_config() {
     local vm_name=$1
+    
     if load_vm_config "$vm_name"; then
         print_status "INFO" "Editing VM: $vm_name"
+        
         while true; do
             echo "What would you like to edit?"
             echo "  1) Hostname"
@@ -526,10 +486,10 @@ edit_vm_config() {
             echo "  7) Memory (RAM)"
             echo "  8) CPU Count"
             echo "  9) Disk Size"
-            echo "  10) Generate SSH via Tmate (Auto-Login)"
             echo "  0) Back to main menu"
             
             read -p "$(print_status "INPUT" "Enter your choice: ")" edit_choice
+            
             case $edit_choice in
                 1)
                     while true; do
@@ -629,9 +589,6 @@ edit_vm_config() {
                         fi
                     done
                     ;;
-                10)
-                    generate_tmate_ssh "$vm_name"
-                    ;;
                 0)
                     return 0
                     ;;
@@ -640,11 +597,14 @@ edit_vm_config() {
                     continue
                     ;;
             esac
+            
             if [[ "$edit_choice" -eq 1 || "$edit_choice" -eq 2 || "$edit_choice" -eq 3 ]]; then
                 print_status "INFO" "Updating cloud-init configuration..."
                 setup_vm_image
             fi
+            
             save_vm_config
+            
             read -p "$(print_status "INPUT" "Continue editing? (y/N): ")" continue_editing
             if [[ ! "$continue_editing" =~ ^[Yy]$ ]]; then
                 break
@@ -655,8 +615,10 @@ edit_vm_config() {
 
 resize_vm_disk() {
     local vm_name=$1
+    
     if load_vm_config "$vm_name"; then
         print_status "INFO" "Current disk size: $DISK_SIZE"
+        
         while true; do
             read -p "$(print_status "INPUT" "Enter new disk size (e.g., 50G): ")" new_disk_size
             if validate_input "size" "$new_disk_size"; then
@@ -664,16 +626,19 @@ resize_vm_disk() {
                     print_status "INFO" "New disk size is the same as current size. No changes made."
                     return 0
                 fi
+                
                 local current_size_num=${DISK_SIZE%[GgMm]}
                 local new_size_num=${new_disk_size%[GgMm]}
                 local current_unit=${DISK_SIZE: -1}
                 local new_unit=${new_disk_size: -1}
+                
                 if [[ "$current_unit" =~ [Gg] ]]; then
                     current_size_num=$((current_size_num * 1024))
                 fi
                 if [[ "$new_unit" =~ [Gg] ]]; then
                     new_size_num=$((new_size_num * 1024))
                 fi
+                
                 if [[ $new_size_num -lt $current_size_num ]]; then
                     print_status "WARN" "Shrinking disk size is not recommended and may cause data loss!"
                     read -p "$(print_status "INPUT" "Are you sure you want to continue? (y/N): ")" confirm_shrink
@@ -682,6 +647,7 @@ resize_vm_disk() {
                         return 0
                     fi
                 fi
+                
                 print_status "INFO" "Resizing disk to $new_disk_size..."
                 if qemu-img resize "$IMG_FILE" "$new_disk_size"; then
                     DISK_SIZE="$new_disk_size"
@@ -699,18 +665,22 @@ resize_vm_disk() {
 
 show_vm_performance() {
     local vm_name=$1
+    
     if load_vm_config "$vm_name"; then
         if is_vm_running "$vm_name"; then
             print_status "INFO" "Performance metrics for VM: $vm_name"
             echo "=========================================="
-            local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$IMG_FILE")
+            
+            local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$vm_name")
             if [[ -n "$qemu_pid" ]]; then
                 echo "QEMU Process Stats:"
                 ps -p "$qemu_pid" -o pid,%cpu,%mem,sz,rss,vsz,cmd --no-headers
                 echo
+                
                 echo "Memory Usage:"
                 free -h
                 echo
+                
                 echo "Disk Usage:"
                 df -h "$IMG_FILE" 2>/dev/null || du -h "$IMG_FILE"
             else
@@ -731,8 +701,10 @@ show_vm_performance() {
 main_menu() {
     while true; do
         display_header
+        
         local vms=($(get_vm_list))
         local vm_count=${#vms[@]}
+        
         if [ $vm_count -gt 0 ]; then
             print_status "INFO" "Found $vm_count existing VM(s):"
             for i in "${!vms[@]}"; do
@@ -744,28 +716,30 @@ main_menu() {
             done
             echo
         fi
+        
         echo "Main Menu:"
         echo "  1) Create a new VM"
         if [ $vm_count -gt 0 ]; then
-            echo "  2) Start a VM"
+            echo "  2) Start / Attach a VM"
             echo "  3) Stop a VM"
             echo "  4) Show VM info"
             echo "  5) Edit VM configuration"
             echo "  6) Delete a VM"
             echo "  7) Resize VM disk"
             echo "  8) Show VM performance"
-            echo "  9) Generate SSH via Tmate (Auto-Login)"
         fi
         echo "  0) Exit"
         echo
+        
         read -p "$(print_status "INPUT" "Enter your choice: ")" choice
+        
         case $choice in
             1)
                 create_new_vm
                 ;;
             2)
                 if [ $vm_count -gt 0 ]; then
-                    read -p "$(print_status "INPUT" "Enter VM number to start: ")" vm_num
+                    read -p "$(print_status "INPUT" "Enter VM number to start/attach: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
                         start_vm "${vms[$((vm_num-1))]}"
                     else
@@ -833,16 +807,6 @@ main_menu() {
                     fi
                 fi
                 ;;
-            9)
-                if [ $vm_count -gt 0 ]; then
-                    read -p "$(print_status "INPUT" "Enter VM number to generate tmate SSH: ")" vm_num
-                    if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
-                        generate_tmate_ssh "${vms[$((vm_num-1))]}"
-                    else
-                        print_status "ERROR" "Invalid selection"
-                    fi
-                fi
-                ;;
             0)
                 print_status "INFO" "Goodbye!"
                 exit 0
@@ -851,12 +815,15 @@ main_menu() {
                 print_status "ERROR" "Invalid option"
                 ;;
         esac
+        
         read -p "$(print_status "INPUT" "Press Enter to continue...")"
     done
 }
 
 trap cleanup EXIT
+
 check_dependencies
+
 VM_DIR="${VM_DIR:-$HOME/vms}"
 mkdir -p "$VM_DIR"
 
