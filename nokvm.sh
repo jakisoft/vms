@@ -344,13 +344,18 @@ start_vm() {
             qemu-system-x86_64
             -m "$MEMORY"
             -smp "$CPUS"
-            -cpu qemu64
             -drive "file=$IMG_FILE,format=qcow2,if=virtio"
             -drive "file=$SEED_FILE,format=raw,if=virtio"
             -boot order=c
             -device virtio-net-pci,netdev=n0
             -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
         )
+
+        if [ -c /dev/kvm ] && [ -w /dev/kvm ]; then
+            qemu_cmd+=(-enable-kvm -cpu host)
+        else
+            qemu_cmd+=(-cpu max)
+        fi
 
         if [[ -n "$PORT_FORWARDS" ]]; then
             IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
@@ -376,8 +381,13 @@ start_vm() {
 
         print_status "INFO" "Starting QEMU in screen session 'qemu-$vm_name'..."
         screen -dmS "qemu-$vm_name" "${qemu_cmd[@]}"
-        sleep 1
+        sleep 2
         
+        if ! is_vm_running "$vm_name"; then
+            print_status "ERROR" "VM failed to stay alive inside screen. QEMU might have crashed."
+            return 1
+        fi
+
         print_status "SUCCESS" "VM $vm_name started successfully in background."
         read -p "$(print_status "INPUT" "Do you want to attach to VM console now? (y/N): ")" attach_choice
         if [[ "$attach_choice" =~ ^[Yy]$ ]]; then
