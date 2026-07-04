@@ -1,11 +1,6 @@
 #!/bin/bash
 set -euo pipefail
 
-# =============================
-# Enhanced Multi-VM Manager
-# =============================
-
-# Function to display header
 display_header() {
     clear
     cat << "EOF"
@@ -23,7 +18,6 @@ EOF
     echo
 }
 
-# Function to display colored output
 print_status() {
     local type=$1
     local message=$2
@@ -38,7 +32,6 @@ print_status() {
     esac
 }
 
-# Function to validate input
 validate_input() {
     local type=$1
     local value=$2
@@ -78,7 +71,6 @@ validate_input() {
     return 0
 }
 
-# Function to check dependencies
 check_dependencies() {
     local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img")
     local missing_deps=()
@@ -96,24 +88,20 @@ check_dependencies() {
     fi
 }
 
-# Function to cleanup temporary files
 cleanup() {
     if [ -f "user-data" ]; then rm -f "user-data"; fi
     if [ -f "meta-data" ]; then rm -f "meta-data"; fi
 }
 
-# Function to get all VM configurations
 get_vm_list() {
     find "$VM_DIR" -name "*.conf" -exec basename {} .conf \; 2>/dev/null | sort
 }
 
-# Function to load VM configuration
 load_vm_config() {
     local vm_name=$1
     local config_file="$VM_DIR/$vm_name.conf"
     
     if [[ -f "$config_file" ]]; then
-        # Clear previous variables
         unset VM_NAME OS_TYPE CODENAME IMG_URL HOSTNAME USERNAME PASSWORD
         unset DISK_SIZE MEMORY CPUS SSH_PORT GUI_MODE PORT_FORWARDS IMG_FILE SEED_FILE CREATED
         
@@ -125,7 +113,6 @@ load_vm_config() {
     fi
 }
 
-# Function to save VM configuration
 save_vm_config() {
     local config_file="$VM_DIR/$VM_NAME.conf"
     
@@ -151,12 +138,9 @@ EOF
     print_status "SUCCESS" "Configuration saved to $config_file"
 }
 
-# Function to create new VM
 create_new_vm() {
     print_status "INFO" "Creating a new VM"
     
-    # OS Selection
-    print_status "INFO" "Select an OS to set up:"
     local os_options=()
     local i=1
     for os in "${!OS_OPTIONS[@]}"; do
@@ -176,12 +160,10 @@ create_new_vm() {
         fi
     done
 
-    # Custom Inputs with validation
     while true; do
         read -p "$(print_status "INPUT" "Enter VM name (default: $DEFAULT_HOSTNAME): ")" VM_NAME
         VM_NAME="${VM_NAME:-$DEFAULT_HOSTNAME}"
         if validate_input "name" "$VM_NAME"; then
-            # Check if VM name already exists
             if [[ -f "$VM_DIR/$VM_NAME.conf" ]]; then
                 print_status "ERROR" "VM with name '$VM_NAME' already exists"
             else
@@ -245,7 +227,6 @@ create_new_vm() {
         read -p "$(print_status "INPUT" "SSH Port (default: 2222): ")" SSH_PORT
         SSH_PORT="${SSH_PORT:-2222}"
         if validate_input "port" "$SSH_PORT"; then
-            # Check if port is already in use
             if ss -tln 2>/dev/null | grep -q ":$SSH_PORT "; then
                 print_status "ERROR" "Port $SSH_PORT is already in use"
             else
@@ -268,17 +249,13 @@ create_new_vm() {
         fi
     done
 
-    # Additional network options
     read -p "$(print_status "INPUT" "Additional port forwards (e.g., 8080:80, press Enter for none): ")" PORT_FORWARDS
 
     IMG_FILE="$VM_DIR/$VM_NAME.img"
     SEED_FILE="$VM_DIR/$VM_NAME-seed.iso"
     CREATED="$(date)"
 
-    # Download and setup VM image
     setup_vm_image
-    
-    # Save configuration
     save_vm_config
 }
 
@@ -286,10 +263,8 @@ create_new_vm() {
 setup_vm_image() {
     print_status "INFO" "Downloading and preparing image..."
     
-    # Create VM directory if it doesn't exist
     mkdir -p "$VM_DIR"
     
-    # Check if image already exists
     if [[ -f "$IMG_FILE" ]]; then
         print_status "INFO" "Image file already exists. Skipping download."
     else
@@ -301,19 +276,16 @@ setup_vm_image() {
         mv "$IMG_FILE.tmp" "$IMG_FILE"
     fi
     
-    # Resize the disk image if needed
-    if ! qemu-img resize "$IMG_FILE" "$DISK_SIZE" 2>/dev/null; then
+    if ! qemu-img resize "$IMG_FILE" "$DISK_SIZE" &>/dev/null; then
         print_status "WARN" "Failed to resize disk image. Creating new image with specified size..."
-        # Create a new image with the specified size
         rm -f "$IMG_FILE"
-        qemu-img create -f qcow2 -F qcow2 -b "$IMG_FILE" "$IMG_FILE.tmp" "$DISK_SIZE" 2>/dev/null || \
+        qemu-img create -f qcow2 -F qcow2 -b "$IMG_FILE" "$IMG_FILE.tmp" "$DISK_SIZE" &>/dev/null || \
         qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
         if [ -f "$IMG_FILE.tmp" ]; then
             mv "$IMG_FILE.tmp" "$IMG_FILE"
         fi
     fi
 
-    # cloud-init configuration
     cat > user-data <<EOF
 #cloud-config
 hostname: $HOSTNAME
@@ -344,7 +316,6 @@ EOF
     print_status "SUCCESS" "VM '$VM_NAME' created successfully."
 }
 
-# Function to start a VM
 start_vm() {
     local vm_name=$1
     
@@ -353,19 +324,16 @@ start_vm() {
         print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
         print_status "INFO" "Password: $PASSWORD"
         
-        # Check if image file exists
         if [[ ! -f "$IMG_FILE" ]]; then
             print_status "ERROR" "VM image file not found: $IMG_FILE"
             return 1
         fi
         
-        # Check if seed file exists
         if [[ ! -f "$SEED_FILE" ]]; then
             print_status "WARN" "Seed file not found, recreating..."
             setup_vm_image
         fi
         
-        # Base QEMU command
         local qemu_cmd=(
             qemu-system-x86_64
             -m "$MEMORY"
@@ -378,7 +346,6 @@ start_vm() {
             -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
         )
 
-        # Add port forwards if specified
         if [[ -n "$PORT_FORWARDS" ]]; then
             IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
             for forward in "${forwards[@]}"; do
@@ -388,14 +355,13 @@ start_vm() {
             done
         fi
 
-        # Add GUI or console mode
         if [[ "$GUI_MODE" == true ]]; then
-            qemu_cmd+=(-vga virtio -display gtk,gl=on)
+            qemu_cmd+=(-vga std -display vnc=:1)
+            print_status "WARN" "OpenGL display unvailable. Running GUI in VNC mode on port 5901 (:1)."
         else
             qemu_cmd+=(-nographic -serial mon:stdio)
         fi
 
-        # Add performance enhancements
         qemu_cmd+=(
             -device virtio-balloon-pci
             -object rng-random,filename=/dev/urandom,id=rng0
@@ -409,7 +375,6 @@ start_vm() {
     fi
 }
 
-# Function to delete a VM
 delete_vm() {
     local vm_name=$1
     
@@ -426,7 +391,6 @@ delete_vm() {
     fi
 }
 
-# Function to show VM info
 show_vm_info() {
     local vm_name=$1
     
@@ -453,7 +417,6 @@ show_vm_info() {
     fi
 }
 
-# Function to check if VM is running
 is_vm_running() {
     local vm_name=$1
     if pgrep -f "qemu-system-x86_64.*$vm_name" >/dev/null; then
@@ -463,7 +426,6 @@ is_vm_running() {
     fi
 }
 
-# Function to stop a running VM
 stop_vm() {
     local vm_name=$1
     
@@ -483,7 +445,6 @@ stop_vm() {
     fi
 }
 
-# Function to edit VM configuration
 edit_vm_config() {
     local vm_name=$1
     
@@ -544,7 +505,6 @@ edit_vm_config() {
                         read -p "$(print_status "INPUT" "Enter new SSH port (current: $SSH_PORT): ")" new_ssh_port
                         new_ssh_port="${new_ssh_port:-$SSH_PORT}"
                         if validate_input "port" "$new_ssh_port"; then
-                            # Check if port is already in use
                             if [ "$new_ssh_port" != "$SSH_PORT" ] && ss -tln 2>/dev/null | grep -q ":$new_ssh_port "; then
                                 print_status "ERROR" "Port $new_ssh_port is already in use"
                             else
@@ -565,7 +525,6 @@ edit_vm_config() {
                             GUI_MODE=false
                             break
                         elif [ -z "$gui_input" ]; then
-                            # Keep current value if user just pressed Enter
                             break
                         else
                             print_status "ERROR" "Please answer y or n"
@@ -615,13 +574,11 @@ edit_vm_config() {
                     ;;
             esac
             
-            # Recreate seed image with new configuration if user/password/hostname changed
             if [[ "$edit_choice" -eq 1 || "$edit_choice" -eq 2 || "$edit_choice" -eq 3 ]]; then
                 print_status "INFO" "Updating cloud-init configuration..."
                 setup_vm_image
             fi
             
-            # Save configuration
             save_vm_config
             
             read -p "$(print_status "INPUT" "Continue editing? (y/N): ")" continue_editing
@@ -632,7 +589,6 @@ edit_vm_config() {
     fi
 }
 
-# Function to resize VM disk
 resize_vm_disk() {
     local vm_name=$1
     
@@ -647,13 +603,11 @@ resize_vm_disk() {
                     return 0
                 fi
                 
-                # Check if new size is smaller than current (not recommended)
                 local current_size_num=${DISK_SIZE%[GgMm]}
                 local new_size_num=${new_disk_size%[GgMm]}
                 local current_unit=${DISK_SIZE: -1}
                 local new_unit=${new_disk_size: -1}
                 
-                # Convert both to MB for comparison
                 if [[ "$current_unit" =~ [Gg] ]]; then
                     current_size_num=$((current_size_num * 1024))
                 fi
@@ -670,7 +624,6 @@ resize_vm_disk() {
                     fi
                 fi
                 
-                # Resize the disk
                 print_status "INFO" "Resizing disk to $new_disk_size..."
                 if qemu-img resize "$IMG_FILE" "$new_disk_size"; then
                     DISK_SIZE="$new_disk_size"
@@ -686,7 +639,6 @@ resize_vm_disk() {
     fi
 }
 
-# Function to show VM performance metrics
 show_vm_performance() {
     local vm_name=$1
     
@@ -695,20 +647,16 @@ show_vm_performance() {
             print_status "INFO" "Performance metrics for VM: $vm_name"
             echo "=========================================="
             
-            # Get QEMU process ID
             local qemu_pid=$(pgrep -f "qemu-system-x86_64.*$IMG_FILE")
             if [[ -n "$qemu_pid" ]]; then
-                # Show process stats
                 echo "QEMU Process Stats:"
                 ps -p "$qemu_pid" -o pid,%cpu,%mem,sz,rss,vsz,cmd --no-headers
                 echo
                 
-                # Show memory usage
                 echo "Memory Usage:"
                 free -h
                 echo
                 
-                # Show disk usage
                 echo "Disk Usage:"
                 df -h "$IMG_FILE" 2>/dev/null || du -h "$IMG_FILE"
             else
@@ -726,7 +674,6 @@ show_vm_performance() {
     fi
 }
 
-# Main menu function
 main_menu() {
     while true; do
         display_header
@@ -849,17 +796,13 @@ main_menu() {
     done
 }
 
-# Set trap to cleanup on exit
 trap cleanup EXIT
 
-# Check dependencies
 check_dependencies
 
-# Initialize paths
 VM_DIR="${VM_DIR:-$HOME/vms}"
 mkdir -p "$VM_DIR"
 
-# Supported OS list
 declare -A OS_OPTIONS=(
     ["Ubuntu 22.04"]="ubuntu|jammy|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
     ["Ubuntu 24.04"]="ubuntu|noble|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24|ubuntu|ubuntu"
@@ -871,5 +814,4 @@ declare -A OS_OPTIONS=(
     ["Rocky Linux 9"]="rockylinux|9|https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2|rocky9|rocky|rocky"
 )
 
-# Start the main menu
 main_menu
