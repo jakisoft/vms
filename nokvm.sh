@@ -29,6 +29,20 @@ print_status() {
     esac
 }
 
+get_best_epyc_model() {
+    local candidate_models=("EPYC-Genoa" "EPYC-Milan" "EPYC-Rome" "EPYC-v4" "EPYC-v3" "EPYC-v2" "EPYC")
+    local supported_models
+    supported_models=$(qemu-system-x86_64 -cpu help 2>/dev/null | awk '{print $2}' || true)
+    
+    for model in "${candidate_models[@]}"; do
+        if echo "$supported_models" | grep -qx "$model"; then
+            echo "$model"
+            return 0
+        fi
+    done
+    echo "EPYC"
+}
+
 get_host_specs() {
     HOST_TOTAL_RAM_MB=$(free -m | awk '/^Mem:/{print $2}')
     HOST_AVAIL_RAM_MB=$(free -m | awk '/^Mem:/{print $7}')
@@ -323,6 +337,10 @@ setup_vm_image() {
 hostname: $HOSTNAME
 ssh_pwauth: true
 disable_root: false
+packages:
+  - toilet
+  - figlet
+  - bc
 users:
   - name: $USERNAME
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -333,11 +351,62 @@ chpasswd:
     root:$PASSWORD
     $USERNAME:$PASSWORD
   expire: false
+write_files:
+  - path: /etc/update-motd.d/01-jksoft-motd
+    permissions: '0755'
+    content: |
+      #!/bin/bash
+      clear
+      if command -v toilet &> /dev/null; then
+          toilet -f big -F metal "JKSoft"
+      elif command -v figlet &> /dev/null; then
+          figlet "JKSoft"
+      else
+          echo -e "\033[1;36mJKSoft\033[0m"
+      fi
+      echo ""
+      echo -e "  \033[1;30m⚡\033[0m \033[1;37mWelcome to JKSoft Cloud Virtual Machine\033[0m"
+      echo ""
+      
+      OS_NAME=\$(grep -oP '(?<=^PRETTY_NAME=).+' /etc/os-release 2>/dev/null | tr -d '"' || uname -sr)
+      KERNEL=\$(uname -r)
+      UPTIME=\$(uptime -p 2>/dev/null | sed 's/up //')
+      CPU_MODEL=\$(lscpu 2>/dev/null | awk -F: '/Model name/ {print \$2}' | sed 's/^[ \t]*//' | head -n 1)
+      CPU_CORES=\$(nproc)
+      CPU_USAGE=\$(top -bn1 2>/dev/null | awk -F, '/%Cpu/ {print \$1}' | awk '{print \$2}')
+      
+      MEM_TOTAL=\$(free -m | awk '/^Mem:/{print \$2}')
+      MEM_USED=\$(free -m | awk '/^Mem:/{print \$3}')
+      MEM_PERCENT=\$(awk "BEGIN {printf \"%.1f\", (\$MEM_USED/\$MEM_TOTAL)*100}")
+      
+      DISK_TOTAL=\$(df -h / | awk 'NR==2 {print \$2}')
+      DISK_USED=\$(df -h / | awk 'NR==2 {print \$3}')
+      DISK_PERCENT=\$(df -h / | awk 'NR==2 {print \$5}')
+      
+      IP_ADDR=\$(hostname -I 2>/dev/null | awk '{print \$1}')
+      LOAD_AVG=\$(awk '{print \$1, \$2, \$3}' /proc/loadavg)
+      
+      printf "    \033[0;34m%-18s\033[0m : %s\n" "Operating System" "\$OS_NAME"
+      printf "    \033[0;34m%-18s\033[0m : %s\n" "Kernel Version" "\$KERNEL"
+      printf "    \033[0;34m%-18s\033[0m : %s\n" "System Uptime" "\$UPTIME"
+      printf "    \033[0;34m%-18s\033[0m : %s (%s Cores)\n" "CPU Model" "\${CPU_MODEL:-AMD EPYC}" "\$CPU_CORES"
+      printf "    \033[0;34m%-18s\033[0m : %s%%\n" "CPU Load" "\${CPU_USAGE:-0}"
+      printf "    \033[0;34m%-18s\033[0m : %s / %s MB (%s%%)\n" "Memory Usage" "\$MEM_USED" "\$MEM_TOTAL" "\$MEM_PERCENT"
+      printf "    \033[0;34m%-18s\033[0m : %s / %s (%s)\n" "Storage Usage" "\$DISK_USED" "\$DISK_TOTAL" "\$DISK_PERCENT"
+      printf "    \033[0;34m%-18s\033[0m : %s\n" "System Load (Avg)" "\$LOAD_AVG"
+      printf "    \033[0;34m%-18s\033[0m : %s\n" "Internal IP" "\$IP_ADDR"
+      echo ""
 runcmd:
+  - chmod -x /etc/update-motd.d/* 2>/dev/null || true
+  - chmod +x /etc/update-motd.d/01-jksoft-motd
+  - rm -f /etc/legal /etc/motd
+  - touch /etc/motd
   - sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
   - sed -i 's/^#\?ClientAliveInterval .*/ClientAliveInterval 30/' /etc/ssh/sshd_config
   - sed -i 's/^#\?ClientAliveCountMax .*/ClientAliveCountMax 5/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PrintMotd .*/PrintMotd no/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PrintLastLog .*/PrintLastLog no/' /etc/ssh/sshd_config
   - echo "UseDNS no" >> /etc/ssh/sshd_config
   - echo "GSSAPIAuthentication no" >> /etc/ssh/sshd_config
   - systemctl restart ssh || systemctl restart sshd
@@ -369,8 +438,10 @@ start_vm() {
         local server_ip
         server_ip=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
         local log_file="$VM_DIR/$vm_name.log"
+        local epyc_cpu
+        epyc_cpu=$(get_best_epyc_model)
 
-        print_status "INFO" "Booting VM '$vm_name' in daemon mode..."
+        print_status "INFO" "Booting VM '$vm_name' with CPU: AMD $epyc_cpu..."
         
         if [[ ! -f "$IMG_FILE" ]]; then
             print_status "ERROR" "Image missing: $IMG_FILE"
@@ -382,13 +453,14 @@ start_vm() {
             setup_vm_image
         fi
 
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing QEMU runtime for $vm_name" > "$log_file"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing QEMU runtime for $vm_name ($epyc_cpu)" > "$log_file"
         
         local qemu_cmd=(
             qemu-system-x86_64
             -name "vm_${vm_name},process=vm_${vm_name}"
             -m "$MEMORY"
             -smp "$CPUS,sockets=1,cores=$CPUS,threads=1"
+            -cpu "$epyc_cpu"
             -drive "file=$IMG_FILE,format=qcow2,if=virtio,cache=writeback,discard=unmap"
             -drive "file=$SEED_FILE,format=raw,if=virtio"
             -boot order=c
@@ -400,9 +472,9 @@ start_vm() {
         )
 
         if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
-            qemu_cmd+=(-enable-kvm -cpu host)
+            qemu_cmd+=(-enable-kvm)
         else
-            qemu_cmd+=(-accel tcg,thread=multi -cpu max)
+            qemu_cmd+=(-accel tcg,thread=multi)
         fi
 
         if [[ -n "$PORT_FORWARDS" ]]; then
@@ -441,13 +513,14 @@ start_vm() {
             echo ""
             echo -e "  \033[1;32m● ONLINE\033[0m  \033[1;37m$vm_name\033[0m"
             echo ""
+            printf "    \033[0;34m%-14s\033[0m : %s (AMD EPYC)\n" "CPU Architecture" "$epyc_cpu"
             printf "    \033[0;34m%-14s\033[0m : ssh -p %s root@%s\n" "SSH (Root)" "$SSH_PORT" "$server_ip"
             printf "    \033[0;34m%-14s\033[0m : ssh -p %s %s@%s\n" "SSH (User)" "$SSH_PORT" "$USERNAME" "$server_ip"
             printf "    \033[0;34m%-14s\033[0m : %s\n" "Password" "$PASSWORD"
             printf "    \033[0;34m%-14s\033[0m : %s\n" "Log Path" "$log_file"
             echo ""
-            print_status "INFO" "Note: Without KVM hardware acceleration, initial boot takes 1-3 minutes."
-            print_status "INFO" "You can monitor live boot progress using Menu 10 (Boot Logs)."
+            print_status "INFO" "Initial boot takes 1-3 minutes without hardware KVM."
+            print_status "INFO" "Monitor live boot progress anytime via Menu 10."
             echo ""
         else
             print_status "ERROR" "Failed to start VM. Inspect log file: $log_file"
@@ -546,6 +619,8 @@ show_vm_info() {
 
         local server_ip
         server_ip=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
+        local epyc_cpu
+        epyc_cpu=$(get_best_epyc_model)
 
         echo ""
         echo -e "  \033[1;36m$vm_name Details\033[0m"
@@ -557,7 +632,7 @@ show_vm_info() {
         printf "    \033[0;34m%-16s\033[0m : ssh -p %s %s@%s\n" "SSH User" "$SSH_PORT" "$USERNAME" "$server_ip"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Password" "$PASSWORD"
         printf "    \033[0;34m%-16s\033[0m : %s MB\n" "Memory" "$MEMORY"
-        printf "    \033[0;34m%-16s\033[0m : %s Core(s)\n" "Processors" "$CPUS"
+        printf "    \033[0;34m%-16s\033[0m : %s Core(s) (AMD %s)\n" "Processors" "$CPUS" "$epyc_cpu"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Storage" "$DISK_SIZE"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "GUI Mode" "$GUI_MODE"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Port Forwards" "${PORT_FORWARDS:-None}"
