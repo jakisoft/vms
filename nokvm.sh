@@ -127,8 +127,9 @@ check_dependencies() {
 }
 
 cleanup() {
-    if [ -f "user-data" ]; then rm -f "user-data"; fi
-    if [ -f "meta-data" ]; then rm -f "meta-data"; fi
+    local tmp_ud="/tmp/user-data-$$"
+    local tmp_md="/tmp/meta-data-$$"
+    rm -f "$tmp_ud" "$tmp_md"
 }
 
 get_vm_list() {
@@ -275,7 +276,7 @@ create_new_vm() {
         SSH_PORT="${SSH_PORT:-2222}"
         if validate_input "port" "$SSH_PORT"; then
             if ss -tln 2>/dev/null | grep -q ":$SSH_PORT "; then
-                print_status "ERROR" "Port $SSH_PORT is in use."
+                print_status "ERROR" "Port $SSH_PORT is already in use by host or another VM."
             else
                 break
             fi
@@ -307,7 +308,7 @@ create_new_vm() {
 }
 
 setup_vm_image() {
-    print_status "INFO" "Preparing disk image..."
+    print_status "INFO" "Preparing disk and isolated cloud-init for '$VM_NAME'..."
     
     mkdir -p "$VM_DIR"
     
@@ -326,7 +327,10 @@ setup_vm_image() {
         qemu-img resize "$IMG_FILE" "$DISK_SIZE" &>/dev/null || true
     fi
 
-    cat > user-data <<EOF
+    local tmp_ud="/tmp/user-data-${VM_NAME}-$$"
+    local tmp_md="/tmp/meta-data-${VM_NAME}-$$"
+
+    cat > "$tmp_ud" <<EOF
 #cloud-config
 hostname: $HOSTNAME
 ssh_pwauth: true
@@ -412,39 +416,54 @@ runcmd:
   - echo "JKSoft Cloud Instance Ready" > /dev/ttyS0
 EOF
 
-    cat > meta-data <<EOF
+    cat > "$tmp_md" <<EOF
 instance-id: iid-$VM_NAME-$(date +%s)
 local-hostname: $HOSTNAME
 EOF
 
     rm -f "$SEED_FILE"
-    if ! cloud-localds "$SEED_FILE" user-data meta-data; then
-        print_status "ERROR" "Failed generating cloud-init ISO."
+    if ! cloud-localds "$SEED_FILE" "$tmp_ud" "$tmp_md"; then
+        print_status "ERROR" "Failed generating cloud-init ISO for '$VM_NAME'."
+        rm -f "$tmp_ud" "$tmp_md"
         exit 1
     fi
+    rm -f "$tmp_ud" "$tmp_md"
     
-    print_status "SUCCESS" "Disk and seed images prepared."
+    print_status "SUCCESS" "Isolated configuration for '$VM_NAME' generated."
 }
 
-get_vm_status() {
+get_exact_vm_pid() {
     local vm_name=$1
     local pid_file="$VM_DIR/$vm_name.pid"
-    local log_file="$VM_DIR/$vm_name.log"
     
-    local is_proc_alive=0
     if [[ -f "$pid_file" ]]; then
         local pid
         pid=$(cat "$pid_file" 2>/dev/null || true)
         if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            is_proc_alive=1
+            if grep -qa "vm_${vm_name}" "/proc/$pid/cmdline" 2>/dev/null; then
+                echo "$pid"
+                return 0
+            fi
         fi
     fi
-    
-    if [ "$is_proc_alive" -eq 0 ] && pgrep -f "qemu-system-x86_64.*vm_${vm_name}" >/dev/null; then
-        is_proc_alive=1
+
+    local matched_pids
+    matched_pids=$(pgrep -f "qemu-system-x86_64.*-name vm_${vm_name}," 2>/dev/null || true)
+    if [[ -n "$matched_pids" ]]; then
+        echo "$matched_pids" | head -n 1
+        return 0
     fi
+
+    echo ""
+}
+
+get_vm_status() {
+    local vm_name=$1
+    local log_file="$VM_DIR/$vm_name.log"
+    local pid
+    pid=$(get_exact_vm_pid "$vm_name")
     
-    if [ "$is_proc_alive" -eq 0 ]; then
+    if [[ -z "$pid" ]]; then
         echo "STOPPED"
         return 0
     fi
@@ -467,6 +486,17 @@ start_vm() {
             return 0
         fi
 
+        local vms=($(get_vm_list))
+        for other_vm in "${vms[@]}"; do
+            if [ "$other_vm" != "$vm_name" ]; then
+                local other_status
+                other_status=$(get_vm_status "$other_vm")
+                if [ "$other_status" == "PROVISIONING" ]; then
+                    print_status "WARN" "Instance '$other_vm' is currently in Provisioning status. Launching '$vm_name' simultaneously..."
+                fi
+            fi
+        done
+
         local server_ip
         server_ip=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
         local log_file="$VM_DIR/$vm_name.log"
@@ -485,7 +515,7 @@ start_vm() {
             setup_vm_image
         fi
 
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing QEMU runtime for $vm_name ($epyc_cpu)" > "$log_file"
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing isolated QEMU runtime for $vm_name ($epyc_cpu)" > "$log_file"
         
         local qemu_cmd=(
             qemu-system-x86_64
@@ -536,12 +566,12 @@ start_vm() {
         )
 
         "${qemu_cmd[@]}" 2>> "$log_file" || {
-            print_status "ERROR" "QEMU execution crashed. Check logs via Menu 11."
+            print_status "ERROR" "QEMU execution crashed for '$vm_name'. Check logs via Menu 11."
             return 1
         }
         
         sleep 1
-        print_status "SUCCESS" "Instance '$vm_name' queued. Returning to Main Menu for live status tracking."
+        print_status "SUCCESS" "Instance '$vm_name' launched. Live status tracking in Main Menu."
     fi
 }
 
@@ -550,31 +580,28 @@ stop_vm() {
     local pid_file="$VM_DIR/$vm_name.pid"
     
     if load_vm_config "$vm_name"; then
-        local current_status
-        current_status=$(get_vm_status "$vm_name")
-        if [ "$current_status" != "STOPPED" ]; then
-            print_status "INFO" "Halting VM '$vm_name'..."
-            if [[ -f "$pid_file" ]]; then
-                local pid
-                pid=$(cat "$pid_file" 2>/dev/null || true)
-                if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-                    kill "$pid" 2>/dev/null || true
-                    sleep 2
-                    if kill -0 "$pid" 2>/dev/null; then
-                        print_status "WARN" "Graceful shutdown timeout. Sending SIGKILL..."
-                        kill -9 "$pid" 2>/dev/null || true
-                    fi
-                fi
-                rm -f "$pid_file"
-            else
-                pkill -f "qemu-system-x86_64.*vm_${vm_name}" 2>/dev/null || true
-                sleep 2
-                if pgrep -f "qemu-system-x86_64.*vm_${vm_name}" >/dev/null; then
-                    pkill -9 -f "qemu-system-x86_64.*vm_${vm_name}" 2>/dev/null || true
-                fi
+        local pid
+        pid=$(get_exact_vm_pid "$vm_name")
+        
+        if [[ -n "$pid" ]]; then
+            print_status "INFO" "Halting instance '$vm_name' (PID: $pid)..."
+            kill "$pid" 2>/dev/null || true
+            
+            local count=0
+            while kill -0 "$pid" 2>/dev/null && [ $count -lt 5 ]; do
+                sleep 1
+                ((count++))
+            done
+            
+            if kill -0 "$pid" 2>/dev/null; then
+                print_status "WARN" "Instance '$vm_name' did not terminate gracefully. Sending SIGKILL..."
+                kill -9 "$pid" 2>/dev/null || true
             fi
-            print_status "SUCCESS" "VM '$vm_name' stopped."
+            
+            rm -f "$pid_file"
+            print_status "SUCCESS" "VM '$vm_name' stopped safely without affecting other instances."
         else
+            rm -f "$pid_file"
             print_status "INFO" "VM '$vm_name' is not active."
         fi
     fi
@@ -587,7 +614,7 @@ restart_vm() {
     current_status=$(get_vm_status "$vm_name")
     if [ "$current_status" != "STOPPED" ]; then
         stop_vm "$vm_name"
-        sleep 2
+        sleep 1
     fi
     start_vm "$vm_name"
 }
@@ -609,13 +636,13 @@ rebuild_vm() {
         current_status=$(get_vm_status "$vm_name")
         if [ "$current_status" != "STOPPED" ]; then
             stop_vm "$vm_name"
-            sleep 2
+            sleep 1
         fi
 
-        print_status "INFO" "Cleaning old storage & logs..."
+        print_status "INFO" "Cleaning storage and logs for '$vm_name'..."
         rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log"
 
-        print_status "INFO" "Rebuilding fresh disk and updating cloud-init configurations..."
+        print_status "INFO" "Rebuilding isolated disk and seed image..."
         setup_vm_image
 
         CREATED="$(date '+%Y-%m-%d %H:%M:%S') (Rebuilt)"
@@ -911,12 +938,7 @@ show_vm_performance() {
         raw_status=$(get_vm_status "$vm_name")
         if [ "$raw_status" != "STOPPED" ]; then
             local qemu_pid
-            if [[ -f "$VM_DIR/$vm_name.pid" ]]; then
-                qemu_pid=$(cat "$VM_DIR/$vm_name.pid" 2>/dev/null || true)
-            fi
-            if [[ -z "$qemu_pid" ]] || ! kill -0 "$qemu_pid" 2>/dev/null; then
-                qemu_pid=$(pgrep -f "qemu-system-x86_64.*vm_${vm_name}" | head -n 1)
-            fi
+            qemu_pid=$(get_exact_vm_pid "$vm_name")
 
             echo ""
             echo -e "  \033[1;36m$vm_name Performance\033[0m"
