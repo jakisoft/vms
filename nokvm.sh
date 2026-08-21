@@ -336,9 +336,12 @@ chpasswd:
 runcmd:
   - sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
   - sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?ClientAliveInterval .*/ClientAliveInterval 30/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?ClientAliveCountMax .*/ClientAliveCountMax 5/' /etc/ssh/sshd_config
   - echo "UseDNS no" >> /etc/ssh/sshd_config
   - echo "GSSAPIAuthentication no" >> /etc/ssh/sshd_config
   - systemctl restart ssh || systemctl restart sshd
+  - echo "JKSoft Cloud Instance Ready" > /dev/ttyS0
 EOF
 
     cat > meta-data <<EOF
@@ -365,6 +368,7 @@ start_vm() {
 
         local server_ip
         server_ip=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
+        local log_file="$VM_DIR/$vm_name.log"
 
         print_status "INFO" "Booting VM '$vm_name' in daemon mode..."
         
@@ -377,6 +381,8 @@ start_vm() {
             print_status "WARN" "Regenerating seed image..."
             setup_vm_image
         fi
+
+        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing QEMU runtime for $vm_name" > "$log_file"
         
         local qemu_cmd=(
             qemu-system-x86_64
@@ -388,6 +394,7 @@ start_vm() {
             -boot order=c
             -device virtio-net-pci,netdev=net0
             -netdev "user,id=net0,hostfwd=tcp::$SSH_PORT-:22"
+            -serial "file:$log_file"
             -pidfile "$VM_DIR/$vm_name.pid"
             -daemonize
         )
@@ -424,7 +431,10 @@ start_vm() {
             -device virtio-rng-pci,rng=rng0
         )
 
-        "${qemu_cmd[@]}"
+        "${qemu_cmd[@]}" 2>> "$log_file" || {
+            print_status "ERROR" "QEMU execution crashed. Check logs via Menu 10."
+            return 1
+        }
         
         sleep 1
         if is_vm_running "$vm_name"; then
@@ -434,9 +444,13 @@ start_vm() {
             printf "    \033[0;34m%-14s\033[0m : ssh -p %s root@%s\n" "SSH (Root)" "$SSH_PORT" "$server_ip"
             printf "    \033[0;34m%-14s\033[0m : ssh -p %s %s@%s\n" "SSH (User)" "$SSH_PORT" "$USERNAME" "$server_ip"
             printf "    \033[0;34m%-14s\033[0m : %s\n" "Password" "$PASSWORD"
+            printf "    \033[0;34m%-14s\033[0m : %s\n" "Log Path" "$log_file"
+            echo ""
+            print_status "INFO" "Note: Without KVM hardware acceleration, initial boot takes 1-3 minutes."
+            print_status "INFO" "You can monitor live boot progress using Menu 10 (Boot Logs)."
             echo ""
         else
-            print_status "ERROR" "Failed to start VM. Check system logs."
+            print_status "ERROR" "Failed to start VM. Inspect log file: $log_file"
         fi
     fi
 }
@@ -484,6 +498,24 @@ restart_vm() {
     start_vm "$vm_name"
 }
 
+view_vm_logs() {
+    local vm_name=$1
+    local log_file="$VM_DIR/$vm_name.log"
+    
+    if [[ ! -f "$log_file" ]]; then
+        print_status "WARN" "Log file not found ($log_file). Start the VM first."
+        return 0
+    fi
+    
+    echo ""
+    echo -e "  \033[1;36mLive System & Console Log for $vm_name\033[0m"
+    echo -e "  \033[0;33m(Press Ctrl+C to exit log view)\033[0m"
+    echo ""
+    trap 'echo ""' INT
+    tail -n 40 -f "$log_file"
+    trap cleanup EXIT
+}
+
 delete_vm() {
     local vm_name=$1
     
@@ -495,7 +527,7 @@ delete_vm() {
             if is_vm_running "$vm_name"; then
                 stop_vm "$vm_name"
             fi
-            rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid"
+            rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log"
             print_status "SUCCESS" "VM '$vm_name' deleted."
         fi
     else
@@ -531,6 +563,7 @@ show_vm_info() {
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Port Forwards" "${PORT_FORWARDS:-None}"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Created Date" "$CREATED"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Disk Image" "$IMG_FILE"
+        printf "    \033[0;34m%-16s\033[0m : %s\n" "Log File" "$VM_DIR/$vm_name.log"
         echo ""
         read -p "$(print_status "INPUT" "Press Enter to continue...")"
     fi
@@ -817,18 +850,19 @@ main_menu() {
         
         echo -e "  \033[1;37mActions\033[0m"
         echo ""
-        echo -e "    \033[1;36m1\033[0m  Deploy New Instance"
+        echo -e "    \033[1;36m1\033[0m   Deploy New Instance"
         if [ $vm_count -gt 0 ]; then
-            echo -e "    \033[1;36m2\033[0m  Start Instance"
-            echo -e "    \033[1;36m3\033[0m  Stop Instance"
-            echo -e "    \033[1;36m4\033[0m  Restart Instance"
-            echo -e "    \033[1;36m5\033[0m  Show Instance Info"
-            echo -e "    \033[1;36m6\033[0m  Edit Configuration"
-            echo -e "    \033[1;36m7\033[0m  Delete Instance"
-            echo -e "    \033[1;36m8\033[0m  Resize Storage"
-            echo -e "    \033[1;36m9\033[0m  Performance Telemetry"
+            echo -e "    \033[1;36m2\033[0m   Start Instance"
+            echo -e "    \033[1;36m3\033[0m   Stop Instance"
+            echo -e "    \033[1;36m4\033[0m   Restart Instance"
+            echo -e "    \033[1;36m5\033[0m   Show Instance Info"
+            echo -e "    \033[1;36m6\033[0m   Edit Configuration"
+            echo -e "    \033[1;36m7\033[0m   Delete Instance"
+            echo -e "    \033[1;36m8\033[0m   Resize Storage"
+            echo -e "    \033[1;36m9\033[0m   Performance Telemetry"
+            echo -e "    \033[1;36m10\033[0m  Live Boot / Console Logs"
         fi
-        echo -e "    \033[1;36m0\033[0m  Exit"
+        echo -e "    \033[1;36m0\033[0m   Exit"
         echo ""
         
         read -p "$(print_status "INPUT" "Option: ")" choice
@@ -912,6 +946,16 @@ main_menu() {
                     read -p "$(print_status "INPUT" "Target index: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
                         show_vm_performance "${vms[$((vm_num-1))]}"
+                    else
+                        print_status "ERROR" "Invalid target."
+                    fi
+                fi
+                ;;
+            10)
+                if [ $vm_count -gt 0 ]; then
+                    read -p "$(print_status "INPUT" "Target index to inspect logs: ")" vm_num
+                    if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
+                        view_vm_logs "${vms[$((vm_num-1))]}"
                     else
                         print_status "ERROR" "Invalid target."
                     fi
