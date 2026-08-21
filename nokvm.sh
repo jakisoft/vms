@@ -413,7 +413,6 @@ runcmd:
   - echo "UseDNS no" >> /etc/ssh/sshd_config
   - echo "GSSAPIAuthentication no" >> /etc/ssh/sshd_config
   - systemctl restart ssh || systemctl restart sshd
-  - echo "JKSoft Cloud Instance Ready" > /dev/ttyS0
 EOF
 
     cat > "$tmp_md" <<EOF
@@ -468,7 +467,7 @@ get_vm_status() {
         return 0
     fi
     
-    if [[ -f "$log_file" ]] && grep -q "JKSoft Cloud Instance Ready" "$log_file" 2>/dev/null; then
+    if [[ -f "$log_file" ]] && grep -qE "cloud-init.*finished at|JKSoft Cloud Instance Ready" "$log_file" 2>/dev/null; then
         echo "ONLINE"
     else
         echo "PROVISIONING"
@@ -515,7 +514,9 @@ start_vm() {
             setup_vm_image
         fi
 
-        echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing isolated QEMU runtime for $vm_name ($epyc_cpu)" > "$log_file"
+        if [[ ! -f "$log_file" ]]; then
+            echo "[$(date '+%Y-%m-%d %H:%M:%S')] Initializing isolated QEMU runtime for $vm_name ($epyc_cpu)" > "$log_file"
+        fi
         
         local qemu_cmd=(
             qemu-system-x86_64
