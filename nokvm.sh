@@ -457,33 +457,6 @@ get_vm_status() {
     fi
 }
 
-wait_for_vm_online() {
-    local vm_name=$1
-    local log_file="$VM_DIR/$vm_name.log"
-    local timeout=180
-    local elapsed=0
-    
-    print_status "INFO" "Provisioning instance '$vm_name' (Waiting for OS & SSH ready)..."
-    while [ $elapsed -lt $timeout ]; do
-        local status
-        status=$(get_vm_status "$vm_name")
-        
-        if [ "$status" == "ONLINE" ]; then
-            print_status "SUCCESS" "Instance '$vm_name' is fully provisioned and ready for SSH!"
-            return 0
-        elif [ "$status" == "STOPPED" ]; then
-            print_status "ERROR" "Process terminated unexpectedly during provisioning."
-            return 1
-        fi
-        
-        printf "\r  \033[1;33m⏳ PROVISIONING\033[0m [%ds / %ds] Configuring system services..." "$elapsed" "$timeout"
-        sleep 3
-        elapsed=$((elapsed + 3))
-    done
-    echo ""
-    print_status "WARN" "Provisioning timeout reached, but VM process is still running."
-}
-
 start_vm() {
     local vm_name=$1
     
@@ -569,17 +542,7 @@ start_vm() {
         }
         
         sleep 1
-        wait_for_vm_online "$vm_name"
-        
-        echo ""
-        echo -e "  \033[1;32m● ONLINE\033[0m  \033[1;37m$vm_name\033[0m"
-        echo ""
-        printf "    \033[0;34m%-14s\033[0m : %s (AMD EPYC)\n" "CPU Model" "$epyc_cpu"
-        printf "    \033[0;34m%-14s\033[0m : ssh -p %s root@%s\n" "SSH (Root)" "$SSH_PORT" "$server_ip"
-        printf "    \033[0;34m%-14s\033[0m : ssh -p %s %s@%s\n" "SSH (User)" "$SSH_PORT" "$USERNAME" "$server_ip"
-        printf "    \033[0;34m%-14s\033[0m : %s\n" "Password" "$PASSWORD"
-        printf "    \033[0;34m%-14s\033[0m : %s\n" "Log Path" "$log_file"
-        echo ""
+        print_status "SUCCESS" "Instance '$vm_name' queued. Returning to Main Menu for live status tracking."
     fi
 }
 
@@ -989,6 +952,7 @@ main_menu() {
         
         local vms=($(get_vm_list))
         local vm_count=${#vms[@]}
+        local has_provisioning=0
         
         if [ $vm_count -gt 0 ]; then
             echo -e "  \033[1;37mVirtual Instances\033[0m"
@@ -1003,8 +967,9 @@ main_menu() {
                     status="\033[1;32mOnline\033[0m"
                     dot="\033[1;32m●\033[0m"
                 elif [ "$raw_status" == "PROVISIONING" ]; then
-                    status="\033[1;33mProvisioning\033[0m"
+                    status="\033[1;33mProvisioning (Penyediaan)\033[0m"
                     dot="\033[1;33m⏳\033[0m"
+                    has_provisioning=1
                 fi
                 printf "    \033[1;36m%d\033[0m  %b  %-22s \033[0;30m|\033[0m %b\n" $((i+1)) "$dot" "${vms[$i]}" "$status"
             done
@@ -1028,8 +993,19 @@ main_menu() {
         fi
         echo -e "    \033[1;36m0\033[0m   Exit"
         echo ""
-        
-        read -p "$(print_status "INPUT" "Option: ")" choice
+
+        local choice=""
+        if [ "$has_provisioning" -eq 1 ]; then
+            if ! read -t 3 -p "$(print_status "INPUT" "Option (Auto-refresh 3s): ")" choice; then
+                continue
+            fi
+        else
+            read -p "$(print_status "INPUT" "Option: ")" choice
+        fi
+
+        if [[ -z "$choice" ]]; then
+            continue
+        fi
         
         case $choice in
             1)
