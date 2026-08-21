@@ -335,6 +335,7 @@ packages:
   - toilet
   - figlet
   - bc
+  - curl
 users:
   - name: $USERNAME
     sudo: ALL=(ALL) NOPASSWD:ALL
@@ -366,8 +367,6 @@ write_files:
       KERNEL_VER=\$(uname -r)
       UPTIME_VAL=\$(uptime -p 2>/dev/null | sed 's/up //')
       PACKAGES_COUNT=\$(dpkg-query -f '\${binary:Package}\n' -W 2>/dev/null | wc -l || echo "N/A")
-      SHELL_VAL=\$(basename "\$SHELL" 2>/dev/null || echo "bash")
-      TERMINAL_VAL=\$(tty 2>/dev/null || echo "pts")
       
       CPU_MODEL=\$(lscpu 2>/dev/null | awk -F: '/Model name/ {print \$2}' | sed 's/^[ \t]*//' | head -n 1)
       CPU_CORES=\$(nproc)
@@ -380,18 +379,18 @@ write_files:
       DISK_PERCENT=\$(df -h / | awk 'NR==2 {print \$5}')
       
       IP_ADDR=\$(hostname -I 2>/dev/null | awk '{print \$1}')
+      PUB_IP=\$(curl -s -m 2 -4 ifconfig.me 2>/dev/null || curl -s -m 2 -4 icanhazip.com 2>/dev/null || echo "N/A")
       
       printf "    \033[1;35m%-12s\033[0m : %s\n" "OS" "\$OS_NAME"
       printf "    \033[1;35m%-12s\033[0m : %s\n" "Host" "KVM/QEMU Cloud VM"
       printf "    \033[1;35m%-12s\033[0m : %s\n" "Kernel" "\$KERNEL_VER"
       printf "    \033[1;35m%-12s\033[0m : %s\n" "Uptime" "\$UPTIME_VAL"
       printf "    \033[1;35m%-12s\033[0m : %s (dpkg)\n" "Packages" "\$PACKAGES_COUNT"
-      printf "    \033[1;35m%-12s\033[0m : %s\n" "Shell" "\$SHELL_VAL"
-      printf "    \033[1;35m%-12s\033[0m : %s\n" "Terminal" "\$TERMINAL_VAL"
       printf "    \033[1;35m%-12s\033[0m : %s (%s Cores)\n" "CPU" "\${CPU_MODEL:-AMD EPYC}" "\$CPU_CORES"
       printf "    \033[1;35m%-12s\033[0m : %sMB / %sMB\n" "Memory" "\$MEM_USED" "\$MEM_TOTAL"
       printf "    \033[1;35m%-12s\033[0m : %s / %s (%s)\n" "Disk" "\$DISK_USED" "\$DISK_TOTAL" "\$DISK_PERCENT"
       printf "    \033[1;35m%-12s\033[0m : %s\n" "Local IP" "\$IP_ADDR"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Public IP" "\$PUB_IP"
       echo ""
       echo -e "    \033[40m   \033[41m   \033[42m   \033[43m   \033[44m   \033[45m   \033[46m   \033[47m   \033[0m"
       echo -e "    \033[100m   \033[101m   \033[102m   \033[103m   \033[104m   \033[105m   \033[106m   \033[107m   \033[0m"
