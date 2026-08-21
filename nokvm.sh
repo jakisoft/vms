@@ -249,12 +249,22 @@ create_new_vm() {
         fi
     done
 
+    local safe_rec_ram=$((HOST_TOTAL_RAM_MB / 2))
+    if [ "$safe_rec_ram" -lt 1024 ]; then safe_rec_ram=1024; fi
+
     while true; do
-        read -p "$(print_status "INPUT" "RAM in MB (Host available: ${HOST_AVAIL_RAM_MB}MB | default: 2048): ")" MEMORY
+        read -p "$(print_status "INPUT" "RAM in MB (Host Total: ${HOST_TOTAL_RAM_MB}MB | Safe: ${safe_rec_ram}MB | default: 2048): ")" MEMORY
         MEMORY="${MEMORY:-2048}"
         if validate_input "number" "$MEMORY"; then
-            if [ "$MEMORY" -gt "$HOST_TOTAL_RAM_MB" ]; then
-                print_status "WARN" "Allocated RAM exceeds physical host RAM ($HOST_TOTAL_RAM_MB MB)."
+            local max_safe_ram=$((HOST_TOTAL_RAM_MB - 1536))
+            if [ "$max_safe_ram" -lt 1024 ]; then max_safe_ram=1024; fi
+            
+            if [ "$MEMORY" -gt "$max_safe_ram" ]; then
+                print_status "WARN" "RAM exceeds recommended threshold ($max_safe_ram MB). Host OOM Killer risk detected!"
+                read -p "$(print_status "INPUT" "Proceed anyway? (y/N): ")" confirm_ram
+                if [[ ! "$confirm_ram" =~ ^[Yy]$ ]]; then
+                    continue
+                fi
             fi
             break
         fi
@@ -335,6 +345,10 @@ setup_vm_image() {
 hostname: $HOSTNAME
 ssh_pwauth: true
 disable_root: false
+swap:
+  filename: /swapfile
+  size: "2147483648"
+  maxsize: "2147483648"
 packages:
   - toilet
   - figlet
@@ -530,6 +544,7 @@ start_vm() {
             -device virtio-net-pci,netdev=net0
             -netdev "user,id=net0,hostfwd=tcp::$SSH_PORT-:22"
             -serial "file:$log_file"
+            -D "$VM_DIR/$vm_name-qemu.log"
             -pidfile "$VM_DIR/$vm_name.pid"
             -daemonize
         )
@@ -641,7 +656,7 @@ rebuild_vm() {
         fi
 
         print_status "INFO" "Cleaning storage and logs for '$vm_name'..."
-        rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log"
+        rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log" "$VM_DIR/$vm_name-qemu.log"
 
         print_status "INFO" "Rebuilding isolated disk and seed image..."
         setup_vm_image
@@ -685,7 +700,7 @@ delete_vm() {
             if [ "$current_status" != "STOPPED" ]; then
                 stop_vm "$vm_name"
             fi
-            rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log"
+            rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log" "$VM_DIR/$vm_name-qemu.log"
             print_status "SUCCESS" "VM '$vm_name' deleted."
         fi
     else
@@ -830,6 +845,16 @@ edit_vm_config() {
                         read -p "$(print_status "INPUT" "Memory in MB (current: $MEMORY | Host Max: $HOST_TOTAL_RAM_MB): ")" new_memory
                         new_memory="${new_memory:-$MEMORY}"
                         if validate_input "number" "$new_memory"; then
+                            local max_safe_ram=$((HOST_TOTAL_RAM_MB - 1536))
+                            if [ "$max_safe_ram" -lt 1024 ]; then max_safe_ram=1024; fi
+                            
+                            if [ "$new_memory" -gt "$max_safe_ram" ]; then
+                                print_status "WARN" "RAM exceeds recommended threshold ($max_safe_ram MB). Host OOM Killer risk detected!"
+                                read -p "$(print_status "INPUT" "Proceed anyway? (y/N): ")" confirm_ram
+                                if [[ ! "$confirm_ram" =~ ^[Yy]$ ]]; then
+                                    continue
+                                fi
+                            fi
                             MEMORY="$new_memory"
                             break
                         fi
