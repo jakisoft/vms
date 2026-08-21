@@ -3,19 +3,20 @@ set -euo pipefail
 
 display_header() {
     clear
-    cat << "EOF"
-========================================================================
-  _    _  ____  _____ _____ _   _  _____ ____   ______     ________
- | |  | |/ __ \|  __ \_   _| \ | |/ ____|  _ \ / __ \ \   / /___  /
- | |__| | |  | | |__) || | |  \| | |  __| |_) | |  | \ \_/ /   / / 
- |  __  | |  | |  ___/ | | |   \ | | |_ |  _ <| |  | |\   /   / /  
- | |  | | |__| | |     _| |_| |\  | |__| | |_) | |__| | | |   / /__ 
- |_|  |_|\____/|_|    |_____|_| \_|\_____|____/ \____/  |_|  /_____|
-                                                                    
-                        POWERED BY HOPINGBOYZ
-========================================================================
-EOF
-    echo
+    if command -v toilet &> /dev/null; then
+        toilet -f big -F metal "JKSoft"
+    elif command -v figlet &> /dev/null; then
+        figlet "JKSoft"
+    else
+        echo "========================================"
+        echo "                JKSOFT                  "
+        echo "========================================"
+    fi
+    echo ""
+    echo "=========================================================="
+    echo "         JKSoft Cloud Virtual Machine Manager             "
+    echo "=========================================================="
+    echo ""
 }
 
 print_status() {
@@ -72,19 +73,35 @@ validate_input() {
 }
 
 check_dependencies() {
-    local deps=("qemu-system-x86_64" "wget" "cloud-localds" "qemu-img")
-    local missing_deps=()
+    local missing_pkgs=()
     
-    for dep in "${deps[@]}"; do
-        if ! command -v "$dep" &> /dev/null; then
-            missing_deps+=("$dep")
+    if ! command -v qemu-system-x86_64 &> /dev/null; then missing_pkgs+=("qemu-system-x86"); fi
+    if ! command -v qemu-img &> /dev/null; then missing_pkgs+=("qemu-utils"); fi
+    if ! command -v cloud-localds &> /dev/null; then missing_pkgs+=("cloud-image-utils"); fi
+    if ! command -v wget &> /dev/null; then missing_pkgs+=("wget"); fi
+    if ! command -v toilet &> /dev/null; then missing_pkgs+=("toilet"); fi
+    if ! command -v figlet &> /dev/null; then missing_pkgs+=("figlet"); fi
+
+    if [ ${#missing_pkgs[@]} -ne 0 ]; then
+        print_status "WARN" "Missing required packages: ${missing_pkgs[*]}"
+        read -p "$(print_status "INPUT" "Do you want to install them automatically? (y/n): ")" auto_install
+        if [[ "$auto_install" =~ ^[Yy]$ ]]; then
+            print_status "INFO" "Updating package lists and installing dependencies..."
+            if command -v apt-get &> /dev/null; then
+                sudo apt-get update -y
+                sudo apt-get install -y "${missing_pkgs[@]}"
+            elif command -v dnf &> /dev/null; then
+                sudo dnf install -y "${missing_pkgs[@]}"
+            elif command -v pacman &> /dev/null; then
+                sudo pacman -Sy --noconfirm "${missing_pkgs[@]}"
+            else
+                print_status "ERROR" "Package manager not recognized. Please install manually: ${missing_pkgs[*]}"
+                exit 1
+            fi
+        else
+            print_status "ERROR" "Cannot proceed without dependencies. Exiting."
+            exit 1
         fi
-    done
-    
-    if [ ${#missing_deps[@]} -ne 0 ]; then
-        print_status "ERROR" "Missing dependencies: ${missing_deps[*]}"
-        print_status "INFO" "On Ubuntu/Debian, try: sudo apt install qemu-system cloud-image-utils wget"
-        exit 1
     fi
 }
 
@@ -300,6 +317,10 @@ chpasswd:
     root:$PASSWORD
     $USERNAME:$PASSWORD
   expire: false
+runcmd:
+  - sed -i 's/^#\?PermitRootLogin .*/PermitRootLogin yes/' /etc/ssh/sshd_config
+  - sed -i 's/^#\?PasswordAuthentication .*/PasswordAuthentication yes/' /etc/ssh/sshd_config
+  - systemctl restart ssh || systemctl restart sshd
 EOF
 
     cat > meta-data <<EOF
@@ -324,8 +345,12 @@ start_vm() {
             return 0
         fi
 
+        local server_ip
+        server_ip=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
+
         print_status "INFO" "Starting VM: $vm_name"
-        print_status "INFO" "SSH: ssh -p $SSH_PORT $USERNAME@localhost"
+        print_status "INFO" "SSH Root: ssh -p $SSH_PORT root@$server_ip"
+        print_status "INFO" "SSH User: ssh -p $SSH_PORT $USERNAME@$server_ip"
         print_status "INFO" "Password: $PASSWORD"
         
         if [[ ! -f "$IMG_FILE" ]]; then
@@ -342,13 +367,17 @@ start_vm() {
             qemu-system-x86_64
             -m "$MEMORY"
             -smp "$CPUS"
-            -cpu qemu64
+            -cpu EPYC
             -drive "file=$IMG_FILE,format=qcow2,if=virtio"
             -drive "file=$SEED_FILE,format=raw,if=virtio"
             -boot order=c
             -device virtio-net-pci,netdev=n0
             -netdev "user,id=n0,hostfwd=tcp::$SSH_PORT-:22"
         )
+
+        if [ -r /dev/kvm ] && [ -w /dev/kvm ]; then
+            qemu_cmd+=(-enable-kvm)
+        fi
 
         if [[ -n "$PORT_FORWARDS" ]]; then
             IFS=',' read -ra forwards <<< "$PORT_FORWARDS"
@@ -361,7 +390,7 @@ start_vm() {
 
         if [[ "$GUI_MODE" == true ]]; then
             qemu_cmd+=(-vga std -display vnc=:1)
-            print_status "WARN" "OpenGL display unavailable. Running GUI in VNC mode on port 5901 (:1)."
+            print_status "WARN" "Running GUI in VNC mode on port 5901 (:1)."
         else
             qemu_cmd+=(-nographic -serial mon:stdio)
         fi
@@ -407,17 +436,20 @@ show_vm_info() {
             current_status="Running"
         fi
 
+        local server_ip
+        server_ip=$(curl -s -4 ifconfig.me || hostname -I | awk '{print $1}')
+
         echo
         print_status "INFO" "VM Information: $vm_name"
         echo "=========================================="
         echo "Status: $current_status"
         echo "OS: $OS_TYPE"
         echo "Hostname: $HOSTNAME"
-        echo "Username: $USERNAME"
+        echo "SSH Access (Root): ssh -p $SSH_PORT root@$server_ip"
+        echo "SSH Access (User): ssh -p $SSH_PORT $USERNAME@$server_ip"
         echo "Password: $PASSWORD"
-        echo "SSH Port: $SSH_PORT"
         echo "Memory: $MEMORY MB"
-        echo "CPUs: $CPUS"
+        echo "CPUs: $CPUS (AMD EPYC)"
         echo "Disk: $DISK_SIZE"
         echo "GUI Mode: $GUI_MODE"
         echo "Port Forwards: ${PORT_FORWARDS:-None}"
@@ -817,14 +849,7 @@ VM_DIR="${VM_DIR:-$HOME/vms}"
 mkdir -p "$VM_DIR"
 
 declare -A OS_OPTIONS=(
-    ["Ubuntu 22.04"]="ubuntu|jammy|https://cloud-images.ubuntu.com/jammy/current/jammy-server-cloudimg-amd64.img|ubuntu22|ubuntu|ubuntu"
     ["Ubuntu 24.04"]="ubuntu|noble|https://cloud-images.ubuntu.com/noble/current/noble-server-cloudimg-amd64.img|ubuntu24|ubuntu|ubuntu"
-    ["Debian 11"]="debian|bullseye|https://cloud.debian.org/images/cloud/bullseye/latest/debian-11-generic-amd64.qcow2|debian11|debian|debian"
-    ["Debian 12"]="debian|bookworm|https://cloud.debian.org/images/cloud/bookworm/latest/debian-12-generic-amd64.qcow2|debian12|debian|debian"
-    ["Fedora 40"]="fedora|40|https://download.fedoraproject.org/pub/fedora/linux/releases/40/Cloud/x86_64/images/Fedora-Cloud-Base-40-1.14.x86_64.qcow2|fedora40|fedora|fedora"
-    ["CentOS Stream 9"]="centos|stream9|https://cloud.centos.org/centos/9-stream/x86_64/images/CentOS-Stream-GenericCloud-9-latest.x86_64.qcow2|centos9|centos|centos"
-    ["AlmaLinux 9"]="almalinux|9|https://repo.almalinux.org/almalinux/9/cloud/x86_64/images/AlmaLinux-9-GenericCloud-latest.x86_64.qcow2|almalinux9|alma|alma"
-    ["Rocky Linux 9"]="rockylinux|9|https://download.rockylinux.org/pub/rocky/9/images/x86_64/Rocky-9-GenericCloud.latest.x86_64.qcow2|rocky9|rocky|rocky"
 )
 
 main_menu
