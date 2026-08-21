@@ -363,32 +363,38 @@ write_files:
       echo ""
       
       OS_NAME=\$(grep -oP '(?<=^PRETTY_NAME=).+' /etc/os-release 2>/dev/null | tr -d '"' || uname -sr)
-      KERNEL=\$(uname -r)
-      UPTIME=\$(uptime -p 2>/dev/null | sed 's/up //')
+      KERNEL_VER=\$(uname -r)
+      UPTIME_VAL=\$(uptime -p 2>/dev/null | sed 's/up //')
+      PACKAGES_COUNT=\$(dpkg-query -f '\${binary:Package}\n' -W 2>/dev/null | wc -l || echo "N/A")
+      SHELL_VAL=\$(basename "\$SHELL" 2>/dev/null || echo "bash")
+      TERMINAL_VAL=\$(tty 2>/dev/null || echo "pts")
+      
       CPU_MODEL=\$(lscpu 2>/dev/null | awk -F: '/Model name/ {print \$2}' | sed 's/^[ \t]*//' | head -n 1)
       CPU_CORES=\$(nproc)
-      CPU_USAGE=\$(top -bn1 2>/dev/null | awk -F, '/%Cpu/ {print \$1}' | awk '{print \$2}')
       
       MEM_TOTAL=\$(free -m | awk '/^Mem:/{print \$2}')
       MEM_USED=\$(free -m | awk '/^Mem:/{print \$3}')
-      MEM_PERCENT=\$(awk "BEGIN {printf \"%.1f\", (\$MEM_USED/\$MEM_TOTAL)*100}")
       
       DISK_TOTAL=\$(df -h / | awk 'NR==2 {print \$2}')
       DISK_USED=\$(df -h / | awk 'NR==2 {print \$3}')
       DISK_PERCENT=\$(df -h / | awk 'NR==2 {print \$5}')
       
       IP_ADDR=\$(hostname -I 2>/dev/null | awk '{print \$1}')
-      LOAD_AVG=\$(awk '{print \$1, \$2, \$3}' /proc/loadavg)
       
-      printf "    \033[0;34m%-18s\033[0m : %s\n" "Operating System" "\$OS_NAME"
-      printf "    \033[0;34m%-18s\033[0m : %s\n" "Kernel Version" "\$KERNEL"
-      printf "    \033[0;34m%-18s\033[0m : %s\n" "System Uptime" "\$UPTIME"
-      printf "    \033[0;34m%-18s\033[0m : %s (%s Cores)\n" "CPU Model" "\${CPU_MODEL:-AMD EPYC}" "\$CPU_CORES"
-      printf "    \033[0;34m%-18s\033[0m : %s%%\n" "CPU Load" "\${CPU_USAGE:-0}"
-      printf "    \033[0;34m%-18s\033[0m : %s / %s MB (%s%%)\n" "Memory Usage" "\$MEM_USED" "\$MEM_TOTAL" "\$MEM_PERCENT"
-      printf "    \033[0;34m%-18s\033[0m : %s / %s (%s)\n" "Storage Usage" "\$DISK_USED" "\$DISK_TOTAL" "\$DISK_PERCENT"
-      printf "    \033[0;34m%-18s\033[0m : %s\n" "System Load (Avg)" "\$LOAD_AVG"
-      printf "    \033[0;34m%-18s\033[0m : %s\n" "Internal IP" "\$IP_ADDR"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "OS" "\$OS_NAME"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Host" "KVM/QEMU Cloud VM"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Kernel" "\$KERNEL_VER"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Uptime" "\$UPTIME_VAL"
+      printf "    \033[1;35m%-12s\033[0m : %s (dpkg)\n" "Packages" "\$PACKAGES_COUNT"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Shell" "\$SHELL_VAL"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Terminal" "\$TERMINAL_VAL"
+      printf "    \033[1;35m%-12s\033[0m : %s (%s Cores)\n" "CPU" "\${CPU_MODEL:-AMD EPYC}" "\$CPU_CORES"
+      printf "    \033[1;35m%-12s\033[0m : %sMB / %sMB\n" "Memory" "\$MEM_USED" "\$MEM_TOTAL"
+      printf "    \033[1;35m%-12s\033[0m : %s / %s (%s)\n" "Disk" "\$DISK_USED" "\$DISK_TOTAL" "\$DISK_PERCENT"
+      printf "    \033[1;35m%-12s\033[0m : %s\n" "Local IP" "\$IP_ADDR"
+      echo ""
+      echo -e "    \033[40m   \033[41m   \033[42m   \033[43m   \033[44m   \033[45m   \033[46m   \033[47m   \033[0m"
+      echo -e "    \033[100m   \033[101m   \033[102m   \033[103m   \033[104m   \033[105m   \033[106m   \033[107m   \033[0m"
       echo ""
 runcmd:
   - chmod -x /etc/update-motd.d/* 2>/dev/null || true
@@ -421,12 +427,71 @@ EOF
     print_status "SUCCESS" "Disk and seed images prepared."
 }
 
+get_vm_status() {
+    local vm_name=$1
+    local pid_file="$VM_DIR/$vm_name.pid"
+    local log_file="$VM_DIR/$vm_name.log"
+    
+    local is_proc_alive=0
+    if [[ -f "$pid_file" ]]; then
+        local pid
+        pid=$(cat "$pid_file" 2>/dev/null || true)
+        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
+            is_proc_alive=1
+        fi
+    fi
+    
+    if [ "$is_proc_alive" -eq 0 ] && pgrep -f "qemu-system-x86_64.*vm_${vm_name}" >/dev/null; then
+        is_proc_alive=1
+    fi
+    
+    if [ "$is_proc_alive" -eq 0 ]; then
+        echo "STOPPED"
+        return 0
+    fi
+    
+    if [[ -f "$log_file" ]] && grep -q "JKSoft Cloud Instance Ready" "$log_file" 2>/dev/null; then
+        echo "ONLINE"
+    else
+        echo "PROVISIONING"
+    fi
+}
+
+wait_for_vm_online() {
+    local vm_name=$1
+    local log_file="$VM_DIR/$vm_name.log"
+    local timeout=180
+    local elapsed=0
+    
+    print_status "INFO" "Provisioning instance '$vm_name' (Waiting for OS & SSH ready)..."
+    while [ $elapsed -lt $timeout ]; do
+        local status
+        status=$(get_vm_status "$vm_name")
+        
+        if [ "$status" == "ONLINE" ]; then
+            print_status "SUCCESS" "Instance '$vm_name' is fully provisioned and ready for SSH!"
+            return 0
+        elif [ "$status" == "STOPPED" ]; then
+            print_status "ERROR" "Process terminated unexpectedly during provisioning."
+            return 1
+        fi
+        
+        printf "\r  \033[1;33m⏳ PROVISIONING\033[0m [%ds / %ds] Configuring system services..." "$elapsed" "$timeout"
+        sleep 3
+        elapsed=$((elapsed + 3))
+    done
+    echo ""
+    print_status "WARN" "Provisioning timeout reached, but VM process is still running."
+}
+
 start_vm() {
     local vm_name=$1
     
     if load_vm_config "$vm_name"; then
-        if is_vm_running "$vm_name"; then
-            print_status "WARN" "VM '$vm_name' is already running."
+        local current_status
+        current_status=$(get_vm_status "$vm_name")
+        if [ "$current_status" != "STOPPED" ]; then
+            print_status "WARN" "VM '$vm_name' is already $current_status."
             return 0
         fi
 
@@ -504,22 +569,17 @@ start_vm() {
         }
         
         sleep 1
-        if is_vm_running "$vm_name"; then
-            echo ""
-            echo -e "  \033[1;32m● ONLINE\033[0m  \033[1;37m$vm_name\033[0m"
-            echo ""
-            printf "    \033[0;34m%-14s\033[0m : %s (AMD EPYC)\n" "CPU Architecture" "$epyc_cpu"
-            printf "    \033[0;34m%-14s\033[0m : ssh -p %s root@%s\n" "SSH (Root)" "$SSH_PORT" "$server_ip"
-            printf "    \033[0;34m%-14s\033[0m : ssh -p %s %s@%s\n" "SSH (User)" "$SSH_PORT" "$USERNAME" "$server_ip"
-            printf "    \033[0;34m%-14s\033[0m : %s\n" "Password" "$PASSWORD"
-            printf "    \033[0;34m%-14s\033[0m : %s\n" "Log Path" "$log_file"
-            echo ""
-            print_status "INFO" "Initial boot takes 1-3 minutes without hardware KVM."
-            print_status "INFO" "Monitor live boot progress anytime via Menu 11."
-            echo ""
-        else
-            print_status "ERROR" "Failed to start VM. Inspect log file: $log_file"
-        fi
+        wait_for_vm_online "$vm_name"
+        
+        echo ""
+        echo -e "  \033[1;32m● ONLINE\033[0m  \033[1;37m$vm_name\033[0m"
+        echo ""
+        printf "    \033[0;34m%-14s\033[0m : %s (AMD EPYC)\n" "CPU Model" "$epyc_cpu"
+        printf "    \033[0;34m%-14s\033[0m : ssh -p %s root@%s\n" "SSH (Root)" "$SSH_PORT" "$server_ip"
+        printf "    \033[0;34m%-14s\033[0m : ssh -p %s %s@%s\n" "SSH (User)" "$SSH_PORT" "$USERNAME" "$server_ip"
+        printf "    \033[0;34m%-14s\033[0m : %s\n" "Password" "$PASSWORD"
+        printf "    \033[0;34m%-14s\033[0m : %s\n" "Log Path" "$log_file"
+        echo ""
     fi
 }
 
@@ -528,7 +588,9 @@ stop_vm() {
     local pid_file="$VM_DIR/$vm_name.pid"
     
     if load_vm_config "$vm_name"; then
-        if is_vm_running "$vm_name"; then
+        local current_status
+        current_status=$(get_vm_status "$vm_name")
+        if [ "$current_status" != "STOPPED" ]; then
             print_status "INFO" "Halting VM '$vm_name'..."
             if [[ -f "$pid_file" ]]; then
                 local pid
@@ -545,7 +607,7 @@ stop_vm() {
             else
                 pkill -f "qemu-system-x86_64.*vm_${vm_name}" 2>/dev/null || true
                 sleep 2
-                if is_vm_running "$vm_name"; then
+                if pgrep -f "qemu-system-x86_64.*vm_${vm_name}" >/dev/null; then
                     pkill -9 -f "qemu-system-x86_64.*vm_${vm_name}" 2>/dev/null || true
                 fi
             fi
@@ -559,7 +621,9 @@ stop_vm() {
 restart_vm() {
     local vm_name=$1
     print_status "INFO" "Restarting VM '$vm_name'..."
-    if is_vm_running "$vm_name"; then
+    local current_status
+    current_status=$(get_vm_status "$vm_name")
+    if [ "$current_status" != "STOPPED" ]; then
         stop_vm "$vm_name"
         sleep 2
     fi
@@ -579,7 +643,9 @@ rebuild_vm() {
             return 0
         fi
 
-        if is_vm_running "$vm_name"; then
+        local current_status
+        current_status=$(get_vm_status "$vm_name")
+        if [ "$current_status" != "STOPPED" ]; then
             stop_vm "$vm_name"
             sleep 2
         fi
@@ -624,7 +690,9 @@ delete_vm() {
     echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if load_vm_config "$vm_name"; then
-            if is_vm_running "$vm_name"; then
+            local current_status
+            current_status=$(get_vm_status "$vm_name")
+            if [ "$current_status" != "STOPPED" ]; then
                 stop_vm "$vm_name"
             fi
             rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.conf" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log"
@@ -639,9 +707,13 @@ show_vm_info() {
     local vm_name=$1
     
     if load_vm_config "$vm_name"; then
+        local raw_status
+        raw_status=$(get_vm_status "$vm_name")
         local current_status="\033[1;31mStopped\033[0m"
-        if is_vm_running "$vm_name"; then
+        if [ "$raw_status" == "ONLINE" ]; then
             current_status="\033[1;32mOnline\033[0m"
+        elif [ "$raw_status" == "PROVISIONING" ]; then
+            current_status="\033[1;33mProvisioning\033[0m"
         fi
 
         local server_ip
@@ -662,32 +734,13 @@ show_vm_info() {
         printf "    \033[0;34m%-16s\033[0m : %s Core(s) (AMD %s)\n" "Processors" "$CPUS" "$epyc_cpu"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Storage" "$DISK_SIZE"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "GUI Mode" "$GUI_MODE"
-        printf "    \033[0;34m%-16s\033[0m : ${PORT_FORWARDS:-None}\n" "Port Forwards"
+        printf "    \033[0;34m%-16s\033[0m : %s\n" "Port Forwards" "${PORT_FORWARDS:-None}"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Created Date" "$CREATED"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Disk Image" "$IMG_FILE"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Log File" "$VM_DIR/$vm_name.log"
         echo ""
         read -p "$(print_status "INPUT" "Press Enter to continue...")"
     fi
-}
-
-is_vm_running() {
-    local vm_name=$1
-    local pid_file="$VM_DIR/$vm_name.pid"
-    
-    if [[ -f "$pid_file" ]]; then
-        local pid
-        pid=$(cat "$pid_file" 2>/dev/null || true)
-        if [[ -n "$pid" ]] && kill -0 "$pid" 2>/dev/null; then
-            return 0
-        fi
-    fi
-    
-    if pgrep -f "qemu-system-x86_64.*vm_${vm_name}" >/dev/null; then
-        return 0
-    fi
-    
-    return 1
 }
 
 edit_vm_config() {
@@ -892,7 +945,9 @@ show_vm_performance() {
     local vm_name=$1
     
     if load_vm_config "$vm_name"; then
-        if is_vm_running "$vm_name"; then
+        local raw_status
+        raw_status=$(get_vm_status "$vm_name")
+        if [ "$raw_status" != "STOPPED" ]; then
             local qemu_pid
             if [[ -f "$VM_DIR/$vm_name.pid" ]]; then
                 qemu_pid=$(cat "$VM_DIR/$vm_name.pid" 2>/dev/null || true)
@@ -939,11 +994,17 @@ main_menu() {
             echo -e "  \033[1;37mVirtual Instances\033[0m"
             echo ""
             for i in "${!vms[@]}"; do
+                local raw_status
+                raw_status=$(get_vm_status "${vms[$i]}")
                 local status="\033[1;31mStopped\033[0m"
                 local dot="\033[1;31m○\033[0m"
-                if is_vm_running "${vms[$i]}"; then
+                
+                if [ "$raw_status" == "ONLINE" ]; then
                     status="\033[1;32mOnline\033[0m"
                     dot="\033[1;32m●\033[0m"
+                elif [ "$raw_status" == "PROVISIONING" ]; then
+                    status="\033[1;33mProvisioning\033[0m"
+                    dot="\033[1;33m⏳\033[0m"
                 fi
                 printf "    \033[1;36m%d\033[0m  %b  %-22s \033[0;30m|\033[0m %b\n" $((i+1)) "$dot" "${vms[$i]}" "$status"
             done
