@@ -311,25 +311,19 @@ setup_vm_image() {
     
     mkdir -p "$VM_DIR"
     
-    if [[ -f "$IMG_FILE" ]]; then
-        print_status "INFO" "Base image already present. Skipping download."
-    else
-        print_status "INFO" "Downloading image from repository..."
-        if ! wget --progress=bar:force "$IMG_URL" -O "$IMG_FILE.tmp"; then
+    local base_raw="$VM_DIR/base-${CODENAME}.img"
+    if [[ ! -f "$base_raw" ]]; then
+        print_status "INFO" "Downloading official cloud base image..."
+        if ! wget --progress=bar:force "$IMG_URL" -O "$base_raw.tmp"; then
             print_status "ERROR" "Download failed."
             exit 1
         fi
-        mv "$IMG_FILE.tmp" "$IMG_FILE"
+        mv "$base_raw.tmp" "$base_raw"
     fi
-    
-    if ! qemu-img resize "$IMG_FILE" "$DISK_SIZE" &>/dev/null; then
-        print_status "WARN" "Direct resize unsupported, rebuilding disk..."
-        rm -f "$IMG_FILE"
-        qemu-img create -f qcow2 -F qcow2 -b "$IMG_FILE" "$IMG_FILE.tmp" "$DISK_SIZE" &>/dev/null || \
-        qemu-img create -f qcow2 "$IMG_FILE" "$DISK_SIZE"
-        if [ -f "$IMG_FILE.tmp" ]; then
-            mv "$IMG_FILE.tmp" "$IMG_FILE"
-        fi
+
+    if [[ ! -f "$IMG_FILE" ]]; then
+        cp --sparse=always "$base_raw" "$IMG_FILE"
+        qemu-img resize "$IMG_FILE" "$DISK_SIZE" &>/dev/null || true
     fi
 
     cat > user-data <<EOF
@@ -414,16 +408,17 @@ runcmd:
 EOF
 
     cat > meta-data <<EOF
-instance-id: iid-$VM_NAME
+instance-id: iid-$VM_NAME-$(date +%s)
 local-hostname: $HOSTNAME
 EOF
 
+    rm -f "$SEED_FILE"
     if ! cloud-localds "$SEED_FILE" user-data meta-data; then
         print_status "ERROR" "Failed generating cloud-init ISO."
         exit 1
     fi
     
-    print_status "SUCCESS" "VM '$VM_NAME' created."
+    print_status "SUCCESS" "Disk and seed images prepared."
 }
 
 start_vm() {
@@ -504,7 +499,7 @@ start_vm() {
         )
 
         "${qemu_cmd[@]}" 2>> "$log_file" || {
-            print_status "ERROR" "QEMU execution crashed. Check logs via Menu 10."
+            print_status "ERROR" "QEMU execution crashed. Check logs via Menu 11."
             return 1
         }
         
@@ -520,7 +515,7 @@ start_vm() {
             printf "    \033[0;34m%-14s\033[0m : %s\n" "Log Path" "$log_file"
             echo ""
             print_status "INFO" "Initial boot takes 1-3 minutes without hardware KVM."
-            print_status "INFO" "Monitor live boot progress anytime via Menu 10."
+            print_status "INFO" "Monitor live boot progress anytime via Menu 11."
             echo ""
         else
             print_status "ERROR" "Failed to start VM. Inspect log file: $log_file"
@@ -571,6 +566,38 @@ restart_vm() {
     start_vm "$vm_name"
 }
 
+rebuild_vm() {
+    local vm_name=$1
+    
+    if load_vm_config "$vm_name"; then
+        print_status "WARN" "Rebuild will wipe OS disk and apply latest cloud-init/MOTD scripts!"
+        print_status "INFO" "Retained parameters: SSH Port ($SSH_PORT), Username ($USERNAME), Password ($PASSWORD), RAM ($MEMORY MB), CPUs ($CPUS)."
+        read -p "$(print_status "INPUT" "Confirm rebuild operation for '$vm_name'? (y/N): ")" -n 1 -r
+        echo ""
+        if [[ ! $REPLY =~ ^[Yy]$ ]]; then
+            print_status "INFO" "Rebuild operation cancelled."
+            return 0
+        fi
+
+        if is_vm_running "$vm_name"; then
+            stop_vm "$vm_name"
+            sleep 2
+        fi
+
+        print_status "INFO" "Cleaning old storage & logs..."
+        rm -f "$IMG_FILE" "$SEED_FILE" "$VM_DIR/$vm_name.pid" "$VM_DIR/$vm_name.log"
+
+        print_status "INFO" "Rebuilding fresh disk and updating cloud-init configurations..."
+        setup_vm_image
+
+        CREATED="$(date '+%Y-%m-%d %H:%M:%S') (Rebuilt)"
+        save_vm_config
+
+        print_status "SUCCESS" "VM '$vm_name' successfully rebuilt."
+        start_vm "$vm_name"
+    fi
+}
+
 view_vm_logs() {
     local vm_name=$1
     local log_file="$VM_DIR/$vm_name.log"
@@ -594,7 +621,7 @@ delete_vm() {
     
     print_status "WARN" "Permanent deletion requested for: '$vm_name'"
     read -p "$(print_status "INPUT" "Confirm delete operation? (y/N): ")" -n 1 -r
-    echo
+    echo ""
     if [[ $REPLY =~ ^[Yy]$ ]]; then
         if load_vm_config "$vm_name"; then
             if is_vm_running "$vm_name"; then
@@ -635,7 +662,7 @@ show_vm_info() {
         printf "    \033[0;34m%-16s\033[0m : %s Core(s) (AMD %s)\n" "Processors" "$CPUS" "$epyc_cpu"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Storage" "$DISK_SIZE"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "GUI Mode" "$GUI_MODE"
-        printf "    \033[0;34m%-16s\033[0m : %s\n" "Port Forwards" "${PORT_FORWARDS:-None}"
+        printf "    \033[0;34m%-16s\033[0m : ${PORT_FORWARDS:-None}\n" "Port Forwards"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Created Date" "$CREATED"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Disk Image" "$IMG_FILE"
         printf "    \033[0;34m%-16s\033[0m : %s\n" "Log File" "$VM_DIR/$vm_name.log"
@@ -930,12 +957,13 @@ main_menu() {
             echo -e "    \033[1;36m2\033[0m   Start Instance"
             echo -e "    \033[1;36m3\033[0m   Stop Instance"
             echo -e "    \033[1;36m4\033[0m   Restart Instance"
-            echo -e "    \033[1;36m5\033[0m   Show Instance Info"
-            echo -e "    \033[1;36m6\033[0m   Edit Configuration"
-            echo -e "    \033[1;36m7\033[0m   Delete Instance"
-            echo -e "    \033[1;36m8\033[0m   Resize Storage"
-            echo -e "    \033[1;36m9\033[0m   Performance Telemetry"
-            echo -e "    \033[1;36m10\033[0m  Live Boot / Console Logs"
+            echo -e "    \033[1;36m5\033[0m   Rebuild Instance (Clean Install)"
+            echo -e "    \033[1;36m6\033[0m   Show Instance Info"
+            echo -e "    \033[1;36m7\033[0m   Edit Configuration"
+            echo -e "    \033[1;36m8\033[0m   Delete Instance"
+            echo -e "    \033[1;36m9\033[0m   Resize Storage"
+            echo -e "    \033[1;36m10\033[0m  Performance Telemetry"
+            echo -e "    \033[1;36m11\033[0m  Live Boot / Console Logs"
         fi
         echo -e "    \033[1;36m0\033[0m   Exit"
         echo ""
@@ -978,9 +1006,9 @@ main_menu() {
                 ;;
             5)
                 if [ $vm_count -gt 0 ]; then
-                    read -p "$(print_status "INPUT" "Target index: ")" vm_num
+                    read -p "$(print_status "INPUT" "Target index to rebuild: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
-                        show_vm_info "${vms[$((vm_num-1))]}"
+                        rebuild_vm "${vms[$((vm_num-1))]}"
                     else
                         print_status "ERROR" "Invalid target."
                     fi
@@ -990,7 +1018,7 @@ main_menu() {
                 if [ $vm_count -gt 0 ]; then
                     read -p "$(print_status "INPUT" "Target index: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
-                        edit_vm_config "${vms[$((vm_num-1))]}"
+                        show_vm_info "${vms[$((vm_num-1))]}"
                     else
                         print_status "ERROR" "Invalid target."
                     fi
@@ -1000,7 +1028,7 @@ main_menu() {
                 if [ $vm_count -gt 0 ]; then
                     read -p "$(print_status "INPUT" "Target index: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
-                        delete_vm "${vms[$((vm_num-1))]}"
+                        edit_vm_config "${vms[$((vm_num-1))]}"
                     else
                         print_status "ERROR" "Invalid target."
                     fi
@@ -1010,7 +1038,7 @@ main_menu() {
                 if [ $vm_count -gt 0 ]; then
                     read -p "$(print_status "INPUT" "Target index: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
-                        resize_vm_disk "${vms[$((vm_num-1))]}"
+                        delete_vm "${vms[$((vm_num-1))]}"
                     else
                         print_status "ERROR" "Invalid target."
                     fi
@@ -1020,13 +1048,23 @@ main_menu() {
                 if [ $vm_count -gt 0 ]; then
                     read -p "$(print_status "INPUT" "Target index: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
-                        show_vm_performance "${vms[$((vm_num-1))]}"
+                        resize_vm_disk "${vms[$((vm_num-1))]}"
                     else
                         print_status "ERROR" "Invalid target."
                     fi
                 fi
                 ;;
             10)
+                if [ $vm_count -gt 0 ]; then
+                    read -p "$(print_status "INPUT" "Target index: ")" vm_num
+                    if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
+                        show_vm_performance "${vms[$((vm_num-1))]}"
+                    else
+                        print_status "ERROR" "Invalid target."
+                    fi
+                fi
+                ;;
+            11)
                 if [ $vm_count -gt 0 ]; then
                     read -p "$(print_status "INPUT" "Target index to inspect logs: ")" vm_num
                     if [[ "$vm_num" =~ ^[0-9]+$ ]] && [ "$vm_num" -ge 1 ] && [ "$vm_num" -le $vm_count ]; then
